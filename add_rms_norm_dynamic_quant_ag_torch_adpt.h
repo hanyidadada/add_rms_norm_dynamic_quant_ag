@@ -17,34 +17,32 @@
 #define ADD_RMS_NORM_DYNAMIC_QUANT_AG_ADPT_H
 
 namespace vllm_ascend {
-std::tuple<at::Tensor,at::Tensor,at::Tensor> add_rms_norm_dynamic_quant_ag(const at::Tensor & y1, const at::Tensor & x1, const at::Tensor & x2, const at::Tensor & gamma, c10::string_view group, int64_t group_size, double epsilon)
+std::tuple<at::Tensor, at::Tensor, at::Tensor> add_rms_norm_dynamic_quant_ag(
+    const at::Tensor& x1, const at::Tensor& x2, const at::Tensor& gamma,
+    c10::string_view group, int64_t group_size, double epsilon)
 {
-    ::std::array<bool,2> output_mask = {true, false};
-    const c10::optional<at::Tensor> smooth_scale1 = c10::nullopt;
-    const c10::optional<at::Tensor> smooth_scale2 = c10::nullopt;
-    const c10::optional<at::Tensor> beta = c10::nullopt;
-    auto group_ptr = const_cast<char *>(group.data());
+    auto group_ptr = const_cast<char*>(group.data());
 
-    // std::vector<int64_t> y1_size(x1.sizes().vec());
-    // y1_size[0] *= group_size;
+    auto y1_size = x1.sizes().vec();
+    y1_size[0] *= group_size;
 
-    auto y2_size = at::IntArrayRef{};
+    std::vector<int64_t> scale_size(y1_size.begin(), y1_size.end() - 1);
     auto x_out_size = x1.sizes();
-    std::vector<int64_t> scale1_size(x1.sizes().vec());
-    scale1_size[0] *= group_size;
-    scale1_size.pop_back();
-    auto scale2_size = std::vector<int64_t>{};
+    auto rstd_size = x1.sizes().vec();
+    rstd_size.back() = 1;
+
     auto y_dtype = at::kChar;
     auto x_out_dtype = x2.scalar_type();
     auto scale_dtype = at::kFloat;
-    // at::Tensor y1 = at::empty(y1_size, x1.options().dtype(y_dtype));
+    int64_t dst_type = static_cast<int64_t>(2);
 
-    at::Tensor y2 = at::empty(y2_size, x1.options().dtype(y_dtype));
+    at::Tensor y1 = at::empty(y1_size, x1.options().dtype(y_dtype));
+    at::Tensor scale = at::empty(scale_size, x1.options().dtype(scale_dtype));
     at::Tensor x_out = at::empty(x_out_size, x2.options().dtype(x_out_dtype));
-    at::Tensor scale1 = at::empty(scale1_size, x1.options().dtype(scale_dtype));
-    at::Tensor scale2 = at::empty(scale2_size, x1.options().dtype(scale_dtype));
-    EXEC_NPU_CMD(aclnnAddRmsNormDynamicQuantAG, x1, x2, gamma, smooth_scale1, smooth_scale2, beta, group_ptr, group_size, epsilon, output_mask, y1, y2, x_out, scale1, scale2);
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y1, x_out, scale1);
+    at::Tensor rstd = at::empty(rstd_size, x1.options().dtype(scale_dtype));
+
+    EXEC_NPU_CMD(aclnnAddRmsNormDynamicQuantAG, x1, x2, gamma, epsilon, dst_type, group_ptr, group_size, y1, scale, x_out, rstd);
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y1, scale, x_out);
 }
 }
 #endif

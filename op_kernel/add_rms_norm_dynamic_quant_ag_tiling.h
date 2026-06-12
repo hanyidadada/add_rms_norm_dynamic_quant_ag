@@ -7,35 +7,35 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+
 /*!
  * \file add_rms_norm_dynamic_quant_ag_tiling.h
+ * \brief Kernel-side tiling data structure for AddRmsNormDynamicQuantAG
  */
+
 #ifndef OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_DYN_QUANT_AG_TILING_H
 #define OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_DYN_QUANT_AG_TILING_H
 
-typedef struct {    
+typedef struct {
+    // ===== MC2 字段（最前面，确保 offsetof 正确）=====
     AscendC::tiling::Mc2InitTiling mc2InitTiling;
     AscendC::tiling::Mc2CcTiling mc2CcTiling;
-    uint64_t useCore;             // 使用的 Core 数量
-    uint64_t groupSize;             // group通信域大小
+    uint64_t groupSize;
     uint64_t rowLen;
     uint64_t rowTotalNum;
-    uint64_t numFirstDim;         // 第一维度的数量
-    uint64_t numLastDimAligned;   // 对齐后的最后一维度数量
-    uint64_t numLastDim;          // 最后一维度的数量
-    uint64_t firstDimPerCoreTail; // 每个 Core 处理的第一维度尾部数量
-    uint64_t firstDimPerCore;     // 每个 Core 处理的第一维度数量
-    uint64_t firstDimPerLoop;     // 每次循环处理的第一维度数量
-    uint64_t lastDimLoopNum;      // 最后一维度的循环次数
-    uint64_t lastDimSliceLen;     // 最后一维度的切片长度
-    uint64_t lastDimSliceLenTail; // 最后一维度的切片尾部长度
-    uint32_t smoothNum1;          // 平滑参数 1
-    uint32_t smoothNum2;          // 平滑参数 2
-    float    epsilon;             // 防止除零的极小值
-    int32_t  outQuant1Flag;       // 输出量化标志位 1
-    int32_t  outQuant2Flag;       // 输出量化标志位 2
-    float    avgFactor;           // 平均因子
-    uint32_t betaFlag;            // Beta 标志位
+
+    // ===== 原有字段（不变）=====
+    uint32_t numRow;         // N - number of rows
+    uint32_t numCol;         // D - number of columns
+    float    epsilon;        // numerical stability term
+    float    avgFactor;      // 1.0 / numCol, pre-computed mean factor
+    uint32_t dstType;        // output quantization type: DT_INT8=2
+    uint32_t coreNum;        // total number of cores used
+    uint32_t headCoreNum;    // number of head cores (with ceil rows)
+    uint32_t rowPerHeadCore; // rows per head core
+    uint32_t rowPerTailCore; // rows per tail core
+    uint32_t multiRowNum;    // rows processed per iteration in MultiN mode
+    uint32_t ubFactor;       // UB allocation factor (aligned col size)
 } AddRmsNormDynamicQuantAGTilingData;
 
-#endif // OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_DYN_QUANT_TILING_H
+#endif // OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_DYN_QUANT_AG_TILING_H

@@ -10,73 +10,305 @@
 
 /*!
  * \file add_rms_norm_dynamic_quant_ag_base.h
- * \brief
+ * \brief Base utilities and AG communication for AddRmsNormDynamicQuantAG fusion kernel
  */
 
-#ifndef ADD_RMS_NORM_DYNAMIC_QUANT_AG_BASE_CLASS_H_
-#define ADD_RMS_NORM_DYNAMIC_QUANT_AG_BASE_CLASS_H_
+#ifndef ADD_RMS_NORM_DYNAMIC_QUANT_AG_BASE_H_
+#define ADD_RMS_NORM_DYNAMIC_QUANT_AG_BASE_H_
 
-#include "add_rms_norm_dynamic_quant_ag_helper.h"
+#include "kernel_operator.h"
+#include "add_rms_norm_dynamic_quant_ag_tiling.h"
 
-constexpr static int32_t FLAG_OFFSET =  100 * 1024 * 1024;
+using namespace AscendC;
 
-template <typename T, typename T_Y, int TILING_KEY, int BUFFER_NUM = 1>
+#if __CCE_AICORE__ != 220
+#define bfloat16_t int16_t
+#endif
+
+// ========== Constants ==========
+
+constexpr int32_t BUFFER_NUM = 1;
+constexpr int32_t NUM_PER_REP_FP32 = 64;   // ONE_REPEAT_BYTE_SIZE / sizeof(float)
+constexpr int32_t NUM_PER_BLK_FP32 = 8;
+constexpr int32_t NUM_PER_REP_HALF = 128;  // ONE_REPEAT_BYTE_SIZE / sizeof(half)
+constexpr int32_t BLOCK_ALIGN_NUM = 16;
+constexpr float ZERO_F = 0.0f;
+constexpr float ONE_F = 1.0f;
+constexpr float MINUS_HALF_F = -0.5f;
+
+// DynamicQuant constants
+constexpr float DYNAMIC_QUANT_INT8_SYM_SCALE = 127.0f;
+constexpr float DYNAMIC_QUANT_INT8_RECIP_SCALE = 1.0f / 127.0f;
+constexpr float DYNAMIC_QUANT_EPSILON = 1e-12f;
+
+// AG constants
+constexpr static int32_t FLAG_OFFSET = 100 * 1024 * 1024;
+constexpr static int32_t USED_UB_SIZE = 160 * 1024;
+
+// ========== Type Traits ==========
+
+template <typename Tp, Tp v>
+struct integral_constant {
+    static constexpr Tp value = v;
+};
+using true_type = integral_constant<bool, true>;
+using false_type = integral_constant<bool, false>;
+
+template <typename, typename>
+struct is_same : public false_type {};
+template <typename Tp>
+struct is_same<Tp, Tp> : public true_type {};
+
+// ========== Utility Functions ==========
+
+template <uint32_t base, typename T = uint32_t>
+__aicore__ inline T AlignUp(T a)
+{
+    return (a + base - 1) / base * base;
+}
+
+template <typename T>
+__aicore__ inline T CeilDiv(T x, T y)
+{
+    return y == 0 ? x : (x + y - 1) / y;
+}
+
+// ========== Data Copy ==========
+
+template <typename T, typename U, typename R>
+__aicore__ inline void DataCopyCustom(const U& dstTensor, const R& srcTensor, const uint32_t count)
+{
+#if __CCE_AICORE__ == 220 || (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113))
+    DataCopyParams customCopyParams;
+    customCopyParams.blockLen = count * sizeof(T);
+    customCopyParams.blockCount = 1;
+    if constexpr (is_same<U, AscendC::LocalTensor<T>>::value) {
+        DataCopyPadParams customPadParams;
+        DataCopyPad(dstTensor, srcTensor, customCopyParams, customPadParams);
+    } else {
+        DataCopyPad(dstTensor, srcTensor, customCopyParams);
+    }
+#else
+    int32_t customNumPerBlock = ONE_BLK_SIZE / sizeof(T);
+    if (count % customNumPerBlock == 0) {
+        DataCopy(dstTensor, srcTensor, count);
+    } else {
+        if constexpr (is_same<U, AscendC::LocalTensor<T>>::value) {
+            int32_t customNum = AlignUp<customNumPerBlock>(count);
+            DataCopy(dstTensor, srcTensor, customNum);
+        } else {
+            int32_t customNum = count / customNumPerBlock * customNumPerBlock;
+            DataCopy(dstTensor, srcTensor, customNum);
+            SetFlag<HardEvent::MTE3_S>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE3_S>(EVENT_ID0);
+            for (int32_t i = 0; i < customNumPerBlock; i++) {
+                T tensorValue = srcTensor.GetValue(count - customNumPerBlock + i);
+                srcTensor.SetValue(i, tensorValue);
+            }
+            SetFlag<HardEvent::S_MTE3>(EVENT_ID0);
+            WaitFlag<HardEvent::S_MTE3>(EVENT_ID0);
+            DataCopy(dstTensor[count - customNumPerBlock], srcTensor, customNumPerBlock);
+        }
+    }
+#endif
+}
+
+// ========== Reduce Operations ==========
+
+__aicore__ inline void ReduceSumCustom(
+    const LocalTensor<float>& dst_local, const LocalTensor<float>& src_local,
+    const LocalTensor<float>& work_local, int32_t count)
+{
+    uint64_t reduceMask = NUM_PER_REP_FP32;
+    int32_t reduceRepeatTimes = count / NUM_PER_REP_FP32;
+    int32_t reduceTailCount = count % NUM_PER_REP_FP32;
+    int32_t reduceBodyCount = reduceRepeatTimes * NUM_PER_REP_FP32;
+
+    BinaryRepeatParams reduceRepeatParams;
+    reduceRepeatParams.src0RepStride = ONE_REPEAT_BYTE_SIZE / ONE_BLK_SIZE;
+    reduceRepeatParams.src0BlkStride = 1;
+    reduceRepeatParams.src1RepStride = 0;
+    reduceRepeatParams.src1BlkStride = 1;
+    reduceRepeatParams.dstRepStride = 0;
+    reduceRepeatParams.dstBlkStride = 1;
+
+    Duplicate(work_local, ZERO_F, NUM_PER_REP_FP32);
+    PipeBarrier<PIPE_V>();
+    if (likely(reduceRepeatTimes > 0)) {
+        Add(work_local, src_local, work_local, reduceMask, reduceRepeatTimes, reduceRepeatParams);
+        PipeBarrier<PIPE_V>();
+    }
+    if (unlikely(reduceTailCount != 0)) {
+        Add(work_local, src_local[reduceBodyCount], work_local, reduceTailCount, 1, reduceRepeatParams);
+        PipeBarrier<PIPE_V>();
+    }
+    BlockReduceSum(dst_local, work_local, 1, reduceMask, 1, 1, DEFAULT_REPEAT_STRIDE);
+    PipeBarrier<PIPE_V>();
+}
+
+__aicore__ inline void BlockReduceSumFP32(
+    const LocalTensor<float>& dst_local, const LocalTensor<float>& src_local, int32_t count)
+{
+    int32_t blockRepeatTimes = count / NUM_PER_REP_FP32;
+    int32_t blockTailCount = count % NUM_PER_REP_FP32;
+    int32_t dstAddr = blockRepeatTimes * NUM_PER_BLK_FP32;
+    int32_t srcAddr = blockRepeatTimes * NUM_PER_REP_FP32;
+    if (likely(blockRepeatTimes > 0)) {
+        BlockReduceSum(dst_local, src_local, blockRepeatTimes, NUM_PER_REP_FP32, 1, 1, DEFAULT_REPEAT_STRIDE);
+        PipeBarrier<PIPE_V>();
+    }
+    if (blockTailCount != 0) {
+        BlockReduceSum(dst_local[dstAddr], src_local[srcAddr], 1, blockTailCount, 1, 1, DEFAULT_REPEAT_STRIDE);
+        PipeBarrier<PIPE_V>();
+    }
+}
+
+__aicore__ inline void ReduceMaxInplace(const LocalTensor<float>& src_local, uint32_t count)
+{
+    uint64_t repsFp32 = count >> 6;       // count / 64
+    uint64_t offsetsFp32 = repsFp32 << 6; // repsFp32 * 64
+    uint64_t remsFp32 = count & 0x3f;     // count % 64
+
+    if (likely(repsFp32 > 1)) {
+        Max(src_local, src_local[NUM_PER_REP_FP32], src_local, NUM_PER_REP_FP32, repsFp32 - 1,
+            {1, 1, 1, 0, 8, 0});
+        PipeBarrier<PIPE_V>();
+    }
+    if (unlikely(remsFp32 > 0) && unlikely(offsetsFp32 > 0)) {
+        Max(src_local, src_local[offsetsFp32], src_local, remsFp32, 1, {1, 1, 1, 0, 8, 0});
+        PipeBarrier<PIPE_V>();
+    }
+    uint32_t mask = repsFp32 > 0 ? NUM_PER_REP_FP32 : count;
+    WholeReduceMax(src_local, src_local, mask, 1, 8, 1, 8);
+    PipeBarrier<PIPE_V>();
+}
+
+// ========== Quantization ==========
+
+__aicore__ inline void QuantizeFp32ToInt8(
+    const LocalTensor<int8_t>& outInt8,
+    const LocalTensor<float>& xFp32,
+    const LocalTensor<int32_t>& tmpInt32,
+    const LocalTensor<half>& tmpHalf,
+    uint32_t count)
+{
+    Cast(tmpInt32, xFp32, RoundMode::CAST_RINT, count);
+    PipeBarrier<PIPE_V>();
+
+    SetDeqScale(static_cast<half>(1.0f));
+    PipeBarrier<PIPE_V>();
+
+    Cast(tmpHalf, tmpInt32, RoundMode::CAST_ROUND, count);
+    PipeBarrier<PIPE_V>();
+
+    Cast(outInt8, tmpHalf, RoundMode::CAST_TRUNC, count);
+    PipeBarrier<PIPE_V>();
+}
+
+// ========== AG: CopyGMToGM_SplitBytes (ping-pong GM-to-GM copy) ==========
+
+__aicore__ inline void CopyGMToGM_SplitBytes(
+    AscendC::GlobalTensor<int8_t> &dst1,
+    AscendC::GlobalTensor<int8_t> &dst2,
+    AscendC::GlobalTensor<int8_t> &src,
+    const uint32_t rowLen,
+    const uint32_t rowTotalNum,
+    AscendC::TBuf<AscendC::TPosition::VECCALC> &copyBuf)
+{
+    constexpr uint32_t EVENT_ID0 = 0;
+    constexpr uint32_t EVENT_ID1 = 1;
+
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+
+    int64_t part1Bytes = rowLen * rowTotalNum;
+    int64_t part2Bytes = rowTotalNum * sizeof(float);
+    int64_t totalBytes = part1Bytes + part2Bytes;
+
+    uint32_t tmpBufferLen = USED_UB_SIZE / 2;
+    constexpr int32_t BufferNum = 2;
+
+    AscendC::LocalTensor<int8_t> ubBase = copyBuf.Get<int8_t>();
+    AscendC::LocalTensor<int8_t> buf1 = ubBase;
+    AscendC::LocalTensor<int8_t> buf2 = ubBase[tmpBufferLen];
+
+    int pingpongId = 0;
+    uint32_t ubMoveBytes = tmpBufferLen;
+    auto processCount = CeilDiv<int64_t>(totalBytes, ubMoveBytes);
+
+    for (uint32_t i = 0; i < processCount; ++i) {
+        uint32_t curBytes = (i == processCount - 1)
+                           ? totalBytes - i * ubMoveBytes
+                           : ubMoveBytes;
+
+        uint32_t copyBytes = static_cast<uint32_t>(curBytes);
+        AscendC::TEventID eventId = (pingpongId == 0) ? EVENT_ID0 : EVENT_ID1;
+        AscendC::LocalTensor<int8_t> ub = (pingpongId == 0) ? buf1 : buf2;
+
+        uint32_t srcOffset = i * ubMoveBytes;
+
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
+
+        AscendC::DataCopyExtParams readParams(1, copyBytes, 0, 0, 0);
+        AscendC::DataCopyPadExtParams<int8_t> padParams(false, 0, 0, 0);
+        AscendC::DataCopyPad(ub, src[srcOffset], readParams, padParams);
+
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(eventId);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(eventId);
+
+        if (srcOffset < part1Bytes) {
+            uint32_t part1End = part1Bytes;
+            uint32_t blockEnd = srcOffset + curBytes;
+            if (blockEnd <= part1End) {
+                AscendC::DataCopyExtParams writeParams(1, copyBytes, 0, 0, 0);
+                AscendC::DataCopyPad(dst1[srcOffset], ub, writeParams);
+            } else {
+                uint32_t bytesInPart1 = part1End - srcOffset;
+                uint32_t bytesInPart2 = curBytes - bytesInPart1;
+                AscendC::DataCopyExtParams p1Params(1, bytesInPart1, 0, 0, 0);
+                AscendC::DataCopyPad(dst1[srcOffset], ub, p1Params);
+                AscendC::DataCopyExtParams p2Params(1, bytesInPart2, 0, 0, 0);
+                AscendC::DataCopyPad(dst2[0], ub[bytesInPart1], p2Params);
+            }
+        } else {
+            uint32_t dst2Offset = srcOffset - part1Bytes;
+            AscendC::DataCopyExtParams writeParams(1, copyBytes, 0, 0, 0);
+            AscendC::DataCopyPad(dst2[dst2Offset], ub, writeParams);
+        }
+
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
+        pingpongId = (pingpongId + 1) % BufferNum;
+    }
+
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+}
+
+// ========== AG Base Class ==========
+
 class KernelAddRmsNormDynamicQuantAGBase {
-public:
-    __aicore__ inline KernelAddRmsNormDynamicQuantAGBase()
-    {}
+protected:
+    Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
+    GM_ADDR buff[16];
+    GM_ADDR y1Out;
+    GM_ADDR scale1Out;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> copyBuf, flagBuf;
+    uint32_t rankId;
+    uint32_t groupSize;
+    uint32_t rowLen;
+    uint32_t rowTotalNum;
+    int32_t blockIdx_;
 
-    __aicore__ inline void InitBaseParams(const AddRmsNormDynamicQuantAGTilingData* tiling)
+public:
+    __aicore__ inline KernelAddRmsNormDynamicQuantAGBase() {}
+
+    __aicore__ inline void InitAGParams(const AddRmsNormDynamicQuantAGTilingData* tiling)
     {
         this->groupSize = tiling->groupSize;
         this->rowLen = tiling->rowLen;
         this->rowTotalNum = tiling->rowTotalNum;
-        this->numFirstDim = tiling->numFirstDim;
-        this->numCore = tiling->useCore;
-        this->numLastDimAligned = tiling->numLastDimAligned; // Quantize better be aligned to 32 elements
-        this->numLastDim = tiling->numLastDim;
 
-        this->firstDimPerCore = tiling->firstDimPerCore;
-        this->firstDimPerCoreTail = tiling->firstDimPerCoreTail;
-        this->firstDimPerLoop = tiling->firstDimPerLoop;
-
-        this->lastDimLoopNum = tiling->lastDimLoopNum;
-        this->lastDimSliceLen = tiling->lastDimSliceLen;
-        this->lastDimSliceLenTail = tiling->lastDimSliceLenTail;
-        this->betaFlag = tiling->betaFlag;
-        this->aveNum = tiling->avgFactor;
-        this->eps = tiling->epsilon;
-
-        this->blockIdx_ = GetBlockIdx();
-        if (this->blockIdx_ != this->numCore - 1) {
-            this->rowStep = this->firstDimPerLoop;
-            this->rowWork = this->firstDimPerCore;
-        } else {
-            this->rowWork = this->firstDimPerCoreTail;
-            this->rowStep = TWO_NUMS_MIN(this->firstDimPerLoop, this->rowWork);
-        }
-        this->rowTail_ = (this->rowWork % this->rowStep == 0) ? this->rowStep : (this->rowWork % this->rowStep);
-        this->gmOffset_ = this->firstDimPerCore * this->numLastDim;
-
-        this->smooth1Exist = tiling->smoothNum1;
-        // 2 dynamic quant operator required 2 scale buffer.
-        this->smooth2Exist = tiling->smoothNum2;
-
-        // dynamic quant max value
-        if constexpr (IsSameType<T_Y, int8_t>::value) {
-            this->quantMaxVal = DYNAMIC_QUANT_DIVIDEND;
-        } else {
-            this->quantMaxVal = DYNAMIC_QUANT_DIVIDEND_INT4;
-        }
-        this->outQuant1Flag = tiling->outQuant1Flag;
-        this->outQuant2Flag = tiling->outQuant2Flag;
-
-        this->isOld = (this->outQuant1Flag == -1) && (this->outQuant2Flag == -1);
-        this->oldDouble = this->isOld && this->smooth1Exist && this->smooth2Exist;
-        this->newSingleFirst = this->smooth1Exist && (this->outQuant1Flag == 1);
-        this->newSingleSecond = this->smooth2Exist && (this->outQuant2Flag == 1);
         auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
-        
         this->hccl_.InitV2(contextGM0, tiling);
         this->hccl_.SetCcTilingV2(offsetof(AddRmsNormDynamicQuantAGTilingData, mc2CcTiling));
         for (int i = 0; i < tiling->groupSize; i++) {
@@ -85,168 +317,88 @@ public:
         this->rankId = this->hccl_.GetRankId();
     }
 
-    __aicore__ inline void InitInGlobalTensors(
-        GM_ADDR x1, GM_ADDR x2, GM_ADDR gamma, GM_ADDR smooth1, GM_ADDR smooth2, GM_ADDR beta)
-    {
-        x1Gm.SetGlobalBuffer((__gm__ T*)(x1) + blockIdx_ * this->gmOffset_);
-        x2Gm.SetGlobalBuffer((__gm__ T*)(x2) + blockIdx_ * this->gmOffset_);
-        gammaGm.SetGlobalBuffer((__gm__ T*)gamma);
-        smooth1Gm.SetGlobalBuffer((__gm__ T*)smooth1);
-        smooth2Gm.SetGlobalBuffer((__gm__ T*)smooth2);
-        if (this->betaFlag == 1) {
-            betaGm.SetGlobalBuffer((__gm__ T*)beta);
-        }
-    }
-
-    __aicore__ inline void InitOutGlobalTensors(GM_ADDR y1, GM_ADDR y2, GM_ADDR x, GM_ADDR outScale1, GM_ADDR outScale2)
-    {
-        int64_t yBufferSize = blockIdx_ * this->gmOffset_;
-        if constexpr (IsSameType<T_Y, int4b_t>::value) {
-            yBufferSize = yBufferSize / 2;
-        }
-        y1Gm.SetGlobalBuffer((__gm__ T_Y*)(y1) + yBufferSize);
-        y2Gm.SetGlobalBuffer((__gm__ T_Y*)(y2) + yBufferSize);
-        xGm.SetGlobalBuffer((__gm__ T*)(x) + blockIdx_ * this->gmOffset_);
-        outScale2Gm.SetGlobalBuffer((__gm__ float*)outScale2 + blockIdx_ * this->firstDimPerCore);
-        outScale1Gm.SetGlobalBuffer((__gm__ float*)outScale1 + blockIdx_ * this->firstDimPerCore);
-    }
-
-    __aicore__ inline void InitWorkSpaceGlobalTensors(GM_ADDR workspace)
-    {}
-
-      __aicore__ inline void CrossRankSyncV1(int32_t flag_idx, int32_t flag_data)
-    {
-        if (blockIdx_ == 0) {
-            SetBuffFlag((__gm__ int32_t *)(buff[this->rankId] + FLAG_OFFSET + flag_idx*sizeof(int32_t)), flag_data);
-        }
-        if (blockIdx_ < this->groupSize) {
-            CheckBuffFlag((__gm__ int32_t *)(buff[blockIdx_] + FLAG_OFFSET + flag_idx*sizeof(int32_t)), flag_data);
-        }
-    }
-    template <typename TC>
-    __aicore__ inline void CopyUbufToGmAlignB16(__gm__ TC *dst, LocalTensor<TC> ubTensor, uint16_t nBurst, uint32_t lenBurst,
-                                                uint16_t srcStride, uint16_t dstStride)
-    {
-        DataCopyExtParams dataCopyParams(nBurst,     // blockCount
-                                        lenBurst,   // blockLen
-                                        srcStride,  // srcStride
-                                        dstStride,  // dstStride
-                                        0);
-        GlobalTensor<TC> gmTensor;
-        gmTensor.SetGlobalBuffer(dst);
-        DataCopyPad(gmTensor, ubTensor, dataCopyParams);
-    }
-    template <typename TC>
-    __aicore__ inline void CopyGmToUbufAlignB16(LocalTensor<TC> ubTensor, __gm__ TC *src, uint16_t nBurst, uint32_t lenBurst,
-                                                uint16_t srcStride, uint16_t dstStride)
-    {
-        DataCopyExtParams dataCopyParams(nBurst,     // blockCount
-                                        lenBurst,   // blockLen
-                                        srcStride,  // srcStride
-                                        dstStride,  // dstStride
-                                        0);
-        GlobalTensor<TC> gmTensor;
-        gmTensor.SetGlobalBuffer(src);
-        DataCopyPadExtParams<TC> padParams;
-        DataCopyPad(ubTensor, gmTensor, dataCopyParams, padParams);
-    }
-
-    __aicore__ inline void SetBuffFlag(__gm__ int32_t *buff, int32_t flag)
+    __aicore__ inline void SetBuffFlag(__gm__ int32_t *buffPtr, int32_t flag)
     {
         SetFlag<HardEvent::S_MTE3>(EVENT_ID2);
         WaitFlag<HardEvent::S_MTE3>(EVENT_ID2);
         LocalTensor<int32_t> ubTensor = flagBuf.Get<int32_t>();
         ubTensor(0) = flag;
-        CopyUbufToGmAlignB16(buff, ubTensor, 1, sizeof(int32_t), 0, 0);
+        DataCopyExtParams dataCopyParams(1, sizeof(int32_t), 0, 0, 0);
+        GlobalTensor<int32_t> gmTensor;
+        gmTensor.SetGlobalBuffer(buffPtr);
+        DataCopyPad(gmTensor, ubTensor, dataCopyParams);
     }
 
-    __aicore__ inline void CheckBuffFlag(__gm__ int32_t *buff, int32_t flag)
+    __aicore__ inline void CheckBuffFlag(__gm__ int32_t *buffPtr, int32_t flag)
     {
         SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
         WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
         LocalTensor<int32_t> ubTensor = flagBuf.Get<int32_t>();
         while (true) {
-            CopyGmToUbufAlignB16(ubTensor, buff, 1, sizeof(int32_t), 0, 0);
+            DataCopyExtParams dataCopyParams(1, sizeof(int32_t), 0, 0, 0);
+            DataCopyPadExtParams<int32_t> padParams;
+            GlobalTensor<int32_t> gmTensor;
+            gmTensor.SetGlobalBuffer(buffPtr);
+            DataCopyPad(ubTensor, gmTensor, dataCopyParams, padParams);
             SetFlag<HardEvent::MTE2_S>(EVENT_ID3);
-            WaitFlag<HardEvent::MTE2_S>(EVENT_ID3); // Scalar等MTE2
+            WaitFlag<HardEvent::MTE2_S>(EVENT_ID3);
             if (ubTensor(0) == flag) {
                 break;
             }
         }
     }
 
-    template <pipe_t pipe>
-    inline __aicore__ void FFTSCrossCoreSync(uint64_t mode, uint64_t flag_id)
+    __aicore__ inline void CrossRankSyncV1(int32_t flag_idx, int32_t flag_data)
     {
-        uint64_t config = 1 | (mode << 4) | (flag_id << 8);
-        ffts_cross_core_sync(pipe, config);
+        if (blockIdx_ == 0) {
+            SetBuffFlag((__gm__ int32_t *)(buff[this->rankId] + FLAG_OFFSET + flag_idx * sizeof(int32_t)), flag_data);
+        }
+        if (blockIdx_ < this->groupSize) {
+            CheckBuffFlag((__gm__ int32_t *)(buff[blockIdx_] + FLAG_OFFSET + flag_idx * sizeof(int32_t)), flag_data);
+        }
     }
-    __aicore__ inline void SetAndWaitAivSync(uint64_t flag_idx, int32_t pipe_depth = 2)
-    {
-        FFTSCrossCoreSync<PIPE_MTE3>(0, flag_idx + pipe_depth);
-        WaitEvent(flag_idx + pipe_depth);
-    }
+
     __aicore__ inline void ResetIpcFlags(int32_t num_flags)
     {
         for (int32_t idx = 0; idx < num_flags; ++idx) {
-            if (blockIdx_ == 0){
-                SetBuffFlag((__gm__ int32_t *)(buff[this->rankId] + FLAG_OFFSET + idx*sizeof(int32_t)), 0);
+            if (blockIdx_ == 0) {
+                SetBuffFlag((__gm__ int32_t *)(buff[this->rankId] + FLAG_OFFSET + idx * sizeof(int32_t)), 0);
             }
         }
     }
-protected:
-    Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
-    GM_ADDR buff[16];
-    GM_ADDR y1Out;
-    GM_ADDR scale1Out;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> copyBuf, flagBuf;
-    GlobalTensor<T> x2Gm;
-    GlobalTensor<T> x1Gm;
-    GlobalTensor<T> smooth1Gm;
-    GlobalTensor<T> gammaGm;
-    GlobalTensor<T> smooth2Gm;
-    GlobalTensor<T> betaGm;
-    GlobalTensor<T_Y> y1Gm;
-    GlobalTensor<T_Y> y2Gm;
-    GlobalTensor<T> xGm;
-    GlobalTensor<float> outScale1Gm;
-    GlobalTensor<float> outScale2Gm;
 
-    uint32_t betaFlag;
-    uint64_t numFirstDim;
-    uint64_t numCore;
-    uint64_t numLastDim;
-    uint64_t firstDimPerCore;
-    uint64_t numLastDimAligned;
-    uint64_t firstDimPerCoreTail;
-    uint64_t firstDimPerLoop;
-    uint64_t lastDimLoopNum;
-    uint64_t lastDimSliceLen;
-    uint64_t lastDimSliceLenTail;
+    __aicore__ inline void ProcessAG()
+    {
+        this->ResetIpcFlags(2);
+        if (this->blockIdx_ < this->groupSize) {
+            AscendC::SyncAll<true>();
+            this->CrossRankSyncV1(0, 1);
+            AscendC::SyncAll<true>();
 
-    float aveNum;
-    float eps;
+            uint64_t tensorLen = this->rowLen * this->rowTotalNum * sizeof(int8_t);
+            uint64_t scaleLen = this->rowTotalNum * sizeof(float);
+            AscendC::GlobalTensor<int8_t> srcTensor;
+            AscendC::GlobalTensor<int8_t> dstTensor;
+            AscendC::GlobalTensor<int8_t> dstScale;
+            srcTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t*>(this->buff[this->blockIdx_]));
+            dstTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t*>(this->y1Out + this->blockIdx_ * tensorLen));
+            dstScale.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t*>(this->scale1Out + this->blockIdx_ * scaleLen));
 
-    uint64_t gmOffset_;
-    uint64_t blockIdx_;
-    uint64_t rowTail_;
-    uint64_t rowStep;
-    uint64_t rowWork;
+            CopyGMToGM_SplitBytes(dstTensor, dstScale, srcTensor,
+                                  this->rowLen, this->rowTotalNum, this->copyBuf);
 
-    bool smooth1Exist;
-    bool smooth2Exist;
-    int32_t outQuant1Flag;
-    int32_t outQuant2Flag;
-    
-    bool isOld;
-    bool oldDouble;
-    bool newSingleFirst;
-    bool newSingleSecond;
-    float quantMaxVal;
-    uint32_t rankId;
-    uint32_t groupSize;
-    uint32_t rowLen;
-    uint32_t rowTotalNum;
+            AscendC::SyncAll<true>();
+            this->CrossRankSyncV1(1, 2);
+            AscendC::SyncAll<true>();
+        } else {
+            AscendC::SyncAll<true>();
+            AscendC::SyncAll<true>();
+            AscendC::SyncAll<true>();
+            AscendC::SyncAll<true>();
+        }
+        PipeBarrier<PIPE_ALL>();
+        this->hccl_.Finalize();
+    }
 };
 
-#endif // __ADD_RMS_NORM_DYNAMIC_QUANT_BASE_CLASS_H_
+#endif // ADD_RMS_NORM_DYNAMIC_QUANT_AG_BASE_H_

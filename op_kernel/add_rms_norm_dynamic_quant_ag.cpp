@@ -10,34 +10,52 @@
 
 /*!
  * \file add_rms_norm_dynamic_quant_ag.cpp
- * \brief
+ * \brief Main kernel entry for AddRmsNormDynamicQuantAG fusion operator.
+ *
+ * Tiling Key Encoding: (dtype_key * 10 + mode_key)
+ *   dtype_key: 1 = half, 3 = bfloat16
+ *   mode_key:  0 = SingleN, 1 = MultiN
+ *
+ * | Key | Template | Data Type |
+ * |-----|----------|-----------|
+ * | 10  | SingleN  | half      |
+ * | 30  | SingleN  | bfloat16  |
+ * | 11  | MultiN   | half      |
+ * | 31  | MultiN   | bfloat16  |
  */
-#include "add_rms_norm_dynamic_quant_ag_normal_kernel.h"
-#include "add_rms_norm_dynamic_quant_ag_single_row_kernel.h"
-#include "add_rms_norm_dynamic_quant_ag_cut_d_kernel.h"
+
+#include "add_rms_norm_dynamic_quant_ag_single_n.h"
+#include "add_rms_norm_dynamic_quant_ag_multi_n.h"
+
+using namespace AscendC;
+
+// Macro for dispatching kernel instantiation
+#define FUSION_AG_OP_IMPL(templateClass, T)          \
+    do {                                               \
+        templateClass<T> op(&pipe);                    \
+        op.Init(x1, x2, gamma,                         \
+                yQuant, scale, yAdd, rstd,             \
+                workspace, &tilingData);               \
+        op.Process();                                  \
+    } while (0)
 
 extern "C" __global__ __aicore__ void add_rms_norm_dynamic_quant_ag(
-    GM_ADDR x1, GM_ADDR x2, GM_ADDR gamma, GM_ADDR smooth1, GM_ADDR smooth2, GM_ADDR beta, GM_ADDR y1, GM_ADDR y2,
-    GM_ADDR x, GM_ADDR outScale1, GM_ADDR outScale2, GM_ADDR workspace, GM_ADDR tiling)
+    GM_ADDR x1, GM_ADDR x2, GM_ADDR gamma,
+    GM_ADDR yQuant, GM_ADDR scale, GM_ADDR yAdd, GM_ADDR rstd,
+    GM_ADDR workspace, GM_ADDR tiling)
 {
     TPipe pipe;
     REGISTER_TILING_DEFAULT(AddRmsNormDynamicQuantAGTilingData);
     GET_TILING_DATA_WITH_STRUCT(AddRmsNormDynamicQuantAGTilingData, tilingData, tiling);
-    GM_ADDR usrWorkspace = AscendC::GetUserWorkspace(workspace);
 
-#define INIT_AND_PROCESS                                                                                        \
-    op.Init(x1, x2, gamma, smooth1, smooth2, beta, y1, y2, x, outScale1, outScale2, usrWorkspace, &tilingData); \
-    op.Process()
-    if (TILING_KEY_IS(0)) {
-        // 0 Tiling, Do Nothing.
-    } else if (TILING_KEY_IS(1)) {
-        KernelAddRmsNormDynamicQuantAGNormal<DTYPE_X1, DTYPE_Y1, 1> op(&pipe);
-        INIT_AND_PROCESS;
-    } else if (TILING_KEY_IS(2)) {
-        KernelAddRmsNormDynamicQuantAGSingleRow<DTYPE_X1, DTYPE_Y1, 2> op(&pipe);
-        INIT_AND_PROCESS;
-    } else if (TILING_KEY_IS(3)) {
-        KernelAddRmsNormDynamicQuantAGSliceD<DTYPE_X1, DTYPE_Y1, 3> op(&pipe);
-        INIT_AND_PROCESS;
+    // Dispatch by tiling key
+    if (TILING_KEY_IS(10)) {
+        FUSION_AG_OP_IMPL(KernelAddRmsNormDynamicQuantAGSingleN, half);
+    } else if (TILING_KEY_IS(30)) {
+        FUSION_AG_OP_IMPL(KernelAddRmsNormDynamicQuantAGSingleN, bfloat16_t);
+    } else if (TILING_KEY_IS(11)) {
+        FUSION_AG_OP_IMPL(KernelAddRmsNormDynamicQuantAGMultiN, half);
+    } else if (TILING_KEY_IS(31)) {
+        FUSION_AG_OP_IMPL(KernelAddRmsNormDynamicQuantAGMultiN, bfloat16_t);
     }
 }

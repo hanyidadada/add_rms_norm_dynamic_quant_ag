@@ -9,150 +9,136 @@
  */
 
 /*!
- * \file add_rms_norm_dynamic_quant_infershape.cpp
- * \brief
+ * \file add_rms_norm_dynamic_quant_ag_infershape.cpp
+ * \brief Shape and data type inference for AddRmsNormDynamicQuantAG
  */
+
+#include "log/log.h"
+#include "register/op_impl_registry.h"
 #include "error_log.h"
 #include "util/shape_util.h"
-#include "op_graph/runtime_util.h"
-#include "mc2_hcom_topo_info.h"
-#include "register/op_impl_registry.h"
+#include "error/ops_error.h"
 
-static constexpr int X1_IDX = 0;
-static constexpr int X2_IDX = 1;
-static constexpr int GAMMA_IDX = 2;
-static constexpr int SMOOTH1_IDX = 3;
-static constexpr int SMOOTH2_IDX = 4;
+// #include "op_graph/runtime_util.h"
 
-static constexpr int Y1_IDX = 0;
-static constexpr int Y2_IDX = 1;
-static constexpr int X_IDX = 2;
-static constexpr int OUT_SCALE1_IDX = 3;
-static constexpr int OUT_SCALE2_IDX = 4;
+static constexpr int IDX_0 = 0;
+static constexpr int IDX_1 = 1;
+static constexpr int IDX_2 = 2;
+static constexpr int IDX_3 = 3;
 
-static constexpr int GROUP_IDX = 0;
-static constexpr int GROUP_SIZE_IDX = 1;
-static constexpr int EPS_IDX = 2;
-static constexpr int OUT_QUANT_1_IDX = 3;
+// AG attribute indices
+static constexpr int ATTR_GROUP_SIZE = 3; // attr index 3 = groupSize
+
 using namespace ge;
 using namespace Ops::Base;
 
 namespace ops {
-static const std::initializer_list<ge::DataType> OUT_TYPE_LIST = {
-    DT_INT8, DT_HIFLOAT8, DT_FLOAT8_E5M2, DT_FLOAT8_E4M3FN, DT_INT4};
-static bool InferReduceShape(const gert::Shape* xShape, const gert::Shape* gammaShape, gert::Shape* reduceShape)
-{
-    size_t gammaDimNum = gammaShape->GetDimNum();
-    size_t xDimNum = xShape->GetDimNum();
-    if (xDimNum < gammaDimNum) {
-        return false;
-    }
-    
-    int64_t xDimValue1 = 0;
-    reduceShape->SetDimNum(xDimNum - gammaDimNum);
-    for (size_t i = 0; i < xDimNum - gammaDimNum; i++) {
-        xDimValue1 = xShape->GetDim(i);
-        reduceShape->SetDim(i, xDimValue1);
-        OPS_LOG_I(
-            "InferShape4AddRmsNormDynamicQuantAG InferReduceShape", "reduceShape[%zu] = [%zu]", i,
-            reduceShape->GetDim(i));
-    }
-    return true;
-}
-
-static bool CheckOptionalShapeExisting(const gert::Shape* smoothShape)
-{
-    OP_CHECK_IF(nullptr == smoothShape, OPS_LOG_D("CheckOptionalShapeExisting", "Get nullptr smoothShape"), return false);
-    return true;
-}
 
 static ge::graphStatus InferShape4AddRmsNormDynamicQuantAG(gert::InferShapeContext* context)
 {
-    OPS_LOG_I(context, "Begin to do InferShape4AddRmsNormDynamicQuantAG");
-    auto* attrs = context->GetAttrs();
-    auto group = attrs->GetAttrPointer<char>(static_cast<int>(GROUP_IDX));
-    auto groupSizePtr = attrs->GetAttrPointer<int>(GROUP_SIZE_IDX);
+    OP_LOGD(context, "Begin to do InferShape4AddRmsNormDynamicQuantAG");
+
     // get input shapes
-    const gert::Shape* x1Shape = context->GetInputShape(X1_IDX);
+    const gert::Shape* x1Shape = context->GetInputShape(IDX_0);
     OP_CHECK_NULL_WITH_CONTEXT(context, x1Shape);
-    const gert::Shape* gammaShape = context->GetInputShape(GAMMA_IDX);
+
+    const gert::Shape* gammaShape = context->GetInputShape(IDX_2);
     OP_CHECK_NULL_WITH_CONTEXT(context, gammaShape);
-    
+
     // get output shapes
-    gert::Shape* y1Shape = context->GetOutputShape(Y1_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, y1Shape);
-    gert::Shape* y2Shape = context->GetOutputShape(Y2_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, y2Shape);
-    gert::Shape* xShape = context->GetOutputShape(X_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
-    gert::Shape* outScale1Shape = context->GetOutputShape(OUT_SCALE1_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outScale1Shape);
-    gert::Shape* outScale2Shape = context->GetOutputShape(OUT_SCALE2_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outScale2Shape);
+    gert::Shape* yQuantShape = context->GetOutputShape(IDX_0);
+    gert::Shape* scaleShape  = context->GetOutputShape(IDX_1);
+    gert::Shape* yAddShape   = context->GetOutputShape(IDX_2);
+    gert::Shape* rstdShape   = context->GetOutputShape(IDX_3);
+    OP_CHECK_NULL_WITH_CONTEXT(context, yQuantShape);
+    OP_CHECK_NULL_WITH_CONTEXT(context, scaleShape);
+    OP_CHECK_NULL_WITH_CONTEXT(context, yAddShape);
+    OP_CHECK_NULL_WITH_CONTEXT(context, rstdShape);
 
-    OP_LOG_E_IF(group == nullptr, GRAPH_FAILED, context->GetNodeName(), "Get group failed.");
-    uint32_t rankNum = 0;
- 
-    rankNum = *groupSizePtr;
-    
-    OPS_LOG_I(context, "InferShape4AddRmsNormDynamicQuantAG  groupSizePtr:%d ranknum: %d", *groupSizePtr, rankNum);
-    *y1Shape = *x1Shape;
-    y1Shape->SetDim(0, y1Shape->GetDim(0) * rankNum);
-    *xShape = *x1Shape;
+    // yAdd: same shape as x1 (unchanged by AG)
+    *yAddShape = *x1Shape;
 
-    const gert::Shape* smooth1Shape = context->GetOptionalInputShape(SMOOTH1_IDX);
-    bool smooth1Exist = CheckOptionalShapeExisting(smooth1Shape);
-    const gert::Shape* smooth2Shape = context->GetOptionalInputShape(SMOOTH2_IDX);
-    bool smooth2Exist = CheckOptionalShapeExisting(smooth2Shape);
-    bool isOnlyExistSmooth2 = (!smooth1Exist) && smooth2Exist;
-    OP_CHECK_IF(isOnlyExistSmooth2, OPS_LOG_E(context, "Dynamic AddRmsNormDynamicQuantAG Not support only have scale2."),
-                return GRAPH_FAILED);
-    // unknown rank
-    if (IsUnknownRank(x1Shape) || IsUnknownRank(gammaShape)) {
-        SetUnknownRank(outScale1Shape);
-        if (smooth2Exist) {
-            *outScale2Shape = *outScale1Shape;
-            *y2Shape = *x1Shape;
-        } else {
-            *y2Shape = gert::Shape({1});
-            *outScale2Shape = gert::Shape({1});
-        }
-        OPS_LOG_I(context, "End to do InferShape4AddRmsNormDynamicQuantAG with unknown rank.");
+    size_t xDimNum = x1Shape->GetDimNum();
+    size_t gammaDimNum = gammaShape->GetDimNum();
+
+    if (IsUnknownRank(*x1Shape) || IsUnknownRank(*gammaShape)) {
+        SetUnknownRank(*yQuantShape);
+        SetUnknownRank(*scaleShape);
+        SetUnknownRank(*rstdShape);
+        OP_LOGD(context, "End to do InferShape4AddRmsNormDynamicQuantAG with unknown rank.");
         return GRAPH_SUCCESS;
     }
 
-    auto ret = InferReduceShape(x1Shape, gammaShape, outScale1Shape);
-    outScale1Shape->SetDim(0, outScale1Shape->GetDim(0) * rankNum);
-    OP_CHECK_IF(!ret, OPS_LOG_E(context, "Dynamic AddRmsNormDynamicQuantAG Not support gammaDimNum > xDimNum."),
-                return GRAPH_FAILED);
-    if (smooth2Exist) {
-        *outScale2Shape = *outScale1Shape;
-        *y2Shape = *y1Shape;
-    } else {
-        *y2Shape = gert::Shape({1});
-        *outScale2Shape = gert::Shape({1});
-    }
-    OPS_LOG_I(context, "InferShape4AddRmsNormDynamicQuantAG y1 shape:%d xx %d,s1 shape:%d", y1Shape->GetDim(0), y1Shape->GetDim(1),outScale1Shape->GetDim(0));
+    OP_CHECK_IF(
+        xDimNum < gammaDimNum,
+        OP_LOGE(context, "x dim num should not be smaller than gamma dim num."),
+        return GRAPH_FAILED);
 
-    OPS_LOG_I(context, "End to do InferShape4AddRmsNormDynamicQuantAG");
+    // Get groupSize attribute for AG
+    int64_t groupSize = 1;
+    auto* attrs = context->GetAttrs();
+    if (attrs != nullptr) {
+        const int32_t* pGroupSize = attrs->GetAttrPointer<int32_t>(ATTR_GROUP_SIZE);
+        if (pGroupSize != nullptr && *pGroupSize > 0) {
+            groupSize = *pGroupSize;
+        }
+    }
+
+    // yQuant: same shape as x1, but first dim × groupSize (AllGather)
+    *yQuantShape = *x1Shape;
+    yQuantShape->SetDim(0, x1Shape->GetDim(0) * groupSize);
+
+    // scale shape: x1 shape without last dimension, first dim × groupSize
+    scaleShape->SetDimNum(xDimNum - 1);
+    scaleShape->SetDim(0, x1Shape->GetDim(0) * groupSize);
+    for (size_t i = 1; i < xDimNum - 1; i++) {
+        scaleShape->SetDim(i, x1Shape->GetDim(i));
+    }
+
+    // rstd shape: same dims as x1, last gamma dims set to 1 (unchanged by AG)
+    rstdShape->SetDimNum(xDimNum);
+    for (size_t i = 0; i < xDimNum; i++) {
+        if (i < xDimNum - gammaDimNum) {
+            rstdShape->SetDim(i, x1Shape->GetDim(i));
+        } else {
+            rstdShape->SetDim(i, 1);
+        }
+    }
+
+    OP_LOGD(context, "End to do InferShape4AddRmsNormDynamicQuantAG");
     return GRAPH_SUCCESS;
 }
 
 static graphStatus InferDataType4AddRmsNormDynamicQuantAG(gert::InferDataTypeContext* context)
 {
-    OPS_LOG_D(context, "Begin to do InferDataType4AddRmsNormDynamicQuantAG");
-    ge::DataType yDtype = ge::DT_INT8;
+    OP_LOGD(context, "Begin to do InferDataType4AddRmsNormDynamicQuantAG");
 
-    context->SetOutputDataType(Y1_IDX, yDtype);
-    context->SetOutputDataType(Y2_IDX, yDtype);
-    context->SetOutputDataType(X_IDX, context->GetInputDataType(X1_IDX));
-    context->SetOutputDataType(OUT_SCALE1_IDX, DT_FLOAT);
-    context->SetOutputDataType(OUT_SCALE2_IDX, DT_FLOAT);
-    OPS_LOG_D(context, "End to do InferDataType4AddRmsNormDynamicQuantAG");
+    // yQuant: INT8 (from dst_type attribute)
+    ge::DataType yDtype = ge::DT_INT8;
+    auto* attrs = context->GetAttrs();
+    if (attrs != nullptr) {
+        const int32_t* pDstDtype = attrs->GetAttrPointer<int32_t>(1); // attr index 1 = dst_type
+        if (pDstDtype != nullptr) {
+            yDtype = static_cast<ge::DataType>(*pDstDtype);
+        }
+    }
+    context->SetOutputDataType(IDX_0, yDtype);
+
+    // scale: FP32
+    context->SetOutputDataType(IDX_1, DT_FLOAT);
+
+    // yAdd: same type as x1
+    context->SetOutputDataType(IDX_2, context->GetInputDataType(IDX_0));
+
+    // rstd: FP32
+    context->SetOutputDataType(IDX_3, DT_FLOAT);
+
+    OP_LOGD(context, "End to do InferDataType4AddRmsNormDynamicQuantAG");
     return GRAPH_SUCCESS;
 }
 
 IMPL_OP_INFERSHAPE(AddRmsNormDynamicQuantAG)
     .InferShape(InferShape4AddRmsNormDynamicQuantAG)
     .InferDataType(InferDataType4AddRmsNormDynamicQuantAG);
+
 } // namespace ops
