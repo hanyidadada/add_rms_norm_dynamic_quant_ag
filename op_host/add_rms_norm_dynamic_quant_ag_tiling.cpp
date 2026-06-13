@@ -40,8 +40,12 @@ constexpr uint32_t SYS_WORKSPACE = 16 * 1024 * 1024; // 16MB system workspace
 constexpr uint32_t USR_WORKSPACE = 256;
 
 // UB size per row estimate coefficients
-constexpr uint32_t UB_PER_ROW_FP16_COEFF = 10;
-constexpr uint32_t UB_PER_ROW_BF16_COEFF = 12;
+// SingleN layout (per row, byte offset, ubLocal<float> base):
+//   x1Local(0) + x2Local(ubFactor) + xFp32Local(ubFactor) + sqxLocal(ubFactor*2)
+//   + tmpLocal(ubFactor*3) + outInt8Local(ubFactor*4)
+//   = ubFactor * (2+2+4+4+4+1) = ubFactor * 17 bytes
+constexpr uint32_t UB_PER_ROW_FP16_COEFF = 17;
+constexpr uint32_t UB_PER_ROW_BF16_COEFF = 17;
 
 static constexpr int IDX_X1    = 0;
 static constexpr int IDX_X2    = 1;

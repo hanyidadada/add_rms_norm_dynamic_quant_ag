@@ -63,6 +63,26 @@ public:
             this->rowWork = this->rowPerTailCore;
         }
 
+        // Guard: cores beyond useCoreNum are AG-only (groupSize > useCoreNum)
+        // useCoreNum = headCoreNum when rowPerTailCore==0, else numCore
+        {
+            uint32_t useCoreNum = (this->rowPerTailCore > 0) ? tiling->coreNum : this->headCoreNum;
+            if (this->blockIdx_ >= useCoreNum) {
+                this->rowWork = 0;
+            }
+        }
+
+        this->rowWork_ = this->rowWork;
+
+        // Guard: extra cores launched for AG only (groupSize > useCoreNum)
+        if (this->rowWork == 0) {
+            this->InitAGParams(tiling);
+            this->y1Out = yQuant;
+            this->scale1Out = scale;
+            pPipe->InitBuffer(unitBuf, MAX_BUFFER);
+            return;
+        }
+
         // Calculate loop count
         this->rowLoop = CeilDiv(this->rowWork, this->multiRowNum);
         this->rowTail = this->rowWork - (this->rowLoop - 1) * this->multiRowNum;
@@ -105,6 +125,16 @@ public:
 
     __aicore__ inline void Process()
     {
+        if (this->rowWork_ == 0) {
+            // Extra core (groupSize > useCoreNum): skip computation, AG sync only
+            PipeBarrier<PIPE_ALL>();
+            pPipe->Reset();
+            pPipe->InitBuffer(this->copyBuf, USED_UB_SIZE);
+            pPipe->InitBuffer(this->flagBuf, 32);
+            this->ProcessAG();
+            return;
+        }
+
         if constexpr (is_same<T, half>::value) {
             ProcessFp16();
         } else {

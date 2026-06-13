@@ -297,6 +297,7 @@ protected:
     uint32_t groupSize;
     uint32_t rowLen;
     uint32_t rowTotalNum;
+    uint32_t rowWork_;  // rows assigned to this core (0 for extra AG-only cores)
     int32_t blockIdx_;
 
 public:
@@ -375,17 +376,20 @@ public:
             this->CrossRankSyncV1(0, 1);
             AscendC::SyncAll<true>();
 
-            uint64_t tensorLen = this->rowLen * this->rowTotalNum * sizeof(int8_t);
-            uint64_t scaleLen = this->rowTotalNum * sizeof(float);
-            AscendC::GlobalTensor<int8_t> srcTensor;
-            AscendC::GlobalTensor<int8_t> dstTensor;
-            AscendC::GlobalTensor<int8_t> dstScale;
-            srcTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t*>(this->buff[this->blockIdx_]));
-            dstTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t*>(this->y1Out + this->blockIdx_ * tensorLen));
-            dstScale.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t*>(this->scale1Out + this->blockIdx_ * scaleLen));
+            // Only copy data if this core actually computed rows
+            if (this->rowWork_ > 0) {
+                uint64_t tensorLen = this->rowLen * this->rowTotalNum * sizeof(int8_t);
+                uint64_t scaleLen = this->rowTotalNum * sizeof(float);
+                AscendC::GlobalTensor<int8_t> srcTensor;
+                AscendC::GlobalTensor<int8_t> dstTensor;
+                AscendC::GlobalTensor<int8_t> dstScale;
+                srcTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t*>(this->buff[this->blockIdx_]));
+                dstTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t*>(this->y1Out + this->blockIdx_ * tensorLen));
+                dstScale.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t*>(this->scale1Out + this->blockIdx_ * scaleLen));
 
-            CopyGMToGM_SplitBytes(dstTensor, dstScale, srcTensor,
-                                  this->rowLen, this->rowTotalNum, this->copyBuf);
+                CopyGMToGM_SplitBytes(dstTensor, dstScale, srcTensor,
+                                      this->rowLen, this->rowTotalNum, this->copyBuf);
+            }
 
             AscendC::SyncAll<true>();
             this->CrossRankSyncV1(1, 2);
