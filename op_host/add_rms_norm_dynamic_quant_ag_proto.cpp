@@ -36,7 +36,7 @@ namespace ops {
 
 static ge::graphStatus InferShape4AddRmsNormDynamicQuantAG(gert::InferShapeContext* context)
 {
-    OP_LOGD(context, "Begin to do InferShape4AddRmsNormDynamicQuantAG");
+    OPS_LOG_D(context, "Begin to do InferShape4AddRmsNormDynamicQuantAG");
 
     // get input shapes
     const gert::Shape* x1Shape = context->GetInputShape(IDX_0);
@@ -65,13 +65,13 @@ static ge::graphStatus InferShape4AddRmsNormDynamicQuantAG(gert::InferShapeConte
         SetUnknownRank(*yQuantShape);
         SetUnknownRank(*scaleShape);
         SetUnknownRank(*rstdShape);
-        OP_LOGD(context, "End to do InferShape4AddRmsNormDynamicQuantAG with unknown rank.");
+        OPS_LOG_D(context, "End to do InferShape4AddRmsNormDynamicQuantAG with unknown rank.");
         return GRAPH_SUCCESS;
     }
 
-    OP_CHECK_IF(
+    OPS_CHECK(
         xDimNum < gammaDimNum,
-        OP_LOGE(context, "x dim num should not be smaller than gamma dim num."),
+        OPS_LOG_E(context->GetNodeName(),, "x dim num should not be smaller than gamma dim num."),
         return GRAPH_FAILED);
 
     // Get groupSize attribute for AG
@@ -105,13 +105,13 @@ static ge::graphStatus InferShape4AddRmsNormDynamicQuantAG(gert::InferShapeConte
         }
     }
 
-    OP_LOGD(context, "End to do InferShape4AddRmsNormDynamicQuantAG");
+    OPS_LOG_D(context->GetNodeName(), "End to do InferShape4AddRmsNormDynamicQuantAG");
     return GRAPH_SUCCESS;
 }
 
 static graphStatus InferDataType4AddRmsNormDynamicQuantAG(gert::InferDataTypeContext* context)
 {
-    OP_LOGD(context, "Begin to do InferDataType4AddRmsNormDynamicQuantAG");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do InferDataType4AddRmsNormDynamicQuantAG");
 
     // yQuant: INT8 (from dst_type attribute)
     ge::DataType yDtype = ge::DT_INT8;
@@ -133,7 +133,7 @@ static graphStatus InferDataType4AddRmsNormDynamicQuantAG(gert::InferDataTypeCon
     // rstd: FP32
     context->SetOutputDataType(IDX_3, DT_FLOAT);
 
-    OP_LOGD(context, "End to do InferDataType4AddRmsNormDynamicQuantAG");
+    OPS_LOG_D(context->GetNodeName(), "End to do InferDataType4AddRmsNormDynamicQuantAG");
     return GRAPH_SUCCESS;
 }
 

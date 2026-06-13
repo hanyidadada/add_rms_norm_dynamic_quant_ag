@@ -102,17 +102,17 @@ static bool CheckDataType(gert::TilingContext* context)
 
     OP_CHECK_IF(
         x1Dtype != x2Dtype,
-        OP_LOGE(context, "x1 and x2 must have the same data type."),
+        OPS_LOG_E(context->GetNodeName(), "x1 and x2 must have the same data type."),
         return false);
 
     OP_CHECK_IF(
         x1Dtype != gammaDtype,
-        OP_LOGE(context, "x1 and gamma must have the same data type."),
+        OPS_LOG_E(context->GetNodeName(), "x1 and gamma must have the same data type."),
         return false);
 
     OP_CHECK_IF(
         x1Dtype != DT_FLOAT16 && x1Dtype != DT_BF16,
-        OP_LOGE(context, "data type must be FP16 or BF16."),
+        OPS_LOG_E(context->GetNodeName(), "data type must be FP16 or BF16."),
         return false);
 
     return true;
@@ -139,38 +139,38 @@ static bool CheckInputOutputDim(gert::TilingContext* context)
     // x1 dims should be 2-8
     OP_CHECK_IF(
         x1DimNum < 2 || x1DimNum > 8,
-        OP_LOGE(context, "x1 dim num must be in range [2, 8]."),
+        OPS_LOG_E(context->GetNodeName(), "x1 dim num must be in range [2, 8]."),
         return false);
 
     // x1, x2, yQuant, yAdd must have same dims
     OP_CHECK_IF(
         x1DimNum != x2DimNum || x1DimNum != yQuantDimNum || x1DimNum != yAddDimNum,
-        OP_LOGE(context, "x1, x2, yQuant, yAdd must have same dims."),
+        OPS_LOG_E(context->GetNodeName(), "x1, x2, yQuant, yAdd must have same dims."),
         return false);
 
     // gamma dims: 1 or must be <= x1 dims
     OP_CHECK_IF(
         gammaDimNum > x1DimNum,
-        OP_LOGE(context, "gamma dim num should not be greater than x1 dim num."),
+        OPS_LOG_E(context->GetNodeName(), "gamma dim num should not be greater than x1 dim num."),
         return false);
 
     // scale dims = x1 dims - 1
     OP_CHECK_IF(
         scaleDimNum != x1DimNum - 1,
-        OP_LOGE(context, "scale dim num should be x1 dim num - 1."),
+        OPS_LOG_E(context->GetNodeName(), "scale dim num should be x1 dim num - 1."),
         return false);
 
     // rstd dims = x1 dims
     OP_CHECK_IF(
         rstdDimNum != x1DimNum,
-        OP_LOGE(context, "rstd dim num should be same as x1 dim num."),
+        OPS_LOG_E(context->GetNodeName(), "rstd dim num should be same as x1 dim num."),
         return false);
 
     // last dim of x1 and gamma must match
     OP_CHECK_IF(
         x1Shape->GetStorageShape().GetDim(x1DimNum - 1) !=
             gammaShape->GetStorageShape().GetDim(gammaDimNum - 1),
-        OP_LOGE(context, "Last dim of x1 and gamma must be the same."),
+        OPS_LOG_E(context->GetNodeName(), "Last dim of x1 and gamma must be the same."),
         return false);
 
     return true;
@@ -290,15 +290,15 @@ static uint32_t DetermineModeAndRows(
 
 static ge::graphStatus TilingPrepareAddRmsNormDynamicQuantAG(gert::TilingParseContext* context)
 {
-    OP_TILING_CHECK(nullptr == context, OP_LOGE("AddRmsNormDynamicQuantAG", "Context is null"), return ge::GRAPH_FAILED);
-    OP_LOGD(context, "Enter TilingPrepareAddRmsNormDynamicQuantAG.");
+    OP_TILING_CHECK(nullptr == context, OPS_LOG_E(context->GetNodeName(), "Context is null"), return ge::GRAPH_FAILED);
+    OPS_LOG_D(context->GetNodeName(), "Enter TilingPrepareAddRmsNormDynamicQuantAG.");
 
     fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
-    OPS_ERR_IF(platformInfoPtr == nullptr, OP_LOGE(context->GetNodeName(), "PlatformInfoPtr is null"),
+    OPS_ERR_IF(platformInfoPtr == nullptr, OPS_LOG_E(context->GetNodeName(), "PlatformInfoPtr is null"),
                return ge::GRAPH_FAILED);
 
     auto compileInfoPtr = context->GetCompiledInfo<AddRmsNormDynamicQuantAGCompileInfo>();
-    OPS_ERR_IF(compileInfoPtr == nullptr, OP_LOGE(context->GetNodeName(), "CompileInfoPtr is null"),
+    OPS_ERR_IF(compileInfoPtr == nullptr, OPS_LOG_E(context->GetNodeName(), "CompileInfoPtr is null"),
                return ge::GRAPH_FAILED);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
@@ -312,12 +312,12 @@ static ge::graphStatus TilingPrepareAddRmsNormDynamicQuantAG(gert::TilingParseCo
 
 static ge::graphStatus TilingAddRmsNormDynamicQuantAG(gert::TilingContext* context)
 {
-    OP_LOGI(context, "Enter TilingAddRmsNormDynamicQuantAG");
+    OPS_LOG_I(context->GetNodeName(), "Enter TilingAddRmsNormDynamicQuantAG");
 
     // 1. Parameter validation
-    OP_CHECK_IF(!CheckNullptr(context), OP_LOGE(context, "Input shape invalid (nullptr)."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(!CheckDataType(context), OP_LOGE(context, "Data type check failed."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(!CheckInputOutputDim(context), OP_LOGE(context, "Dimension check failed."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!CheckNullptr(context), OPS_LOG_E(context->GetNodeName(), "Input shape invalid (nullptr)."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!CheckDataType(context), OPS_LOG_E(context->GetNodeName(), "Data type check failed."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!CheckInputOutputDim(context), OPS_LOG_E(context->GetNodeName(), "Dimension check failed."), return ge::GRAPH_FAILED);
 
     // 2. Get compilation parameters
     uint32_t numCore = 0;
@@ -414,16 +414,16 @@ static ge::graphStatus TilingAddRmsNormDynamicQuantAG(gert::TilingContext* conte
     workSpaces[0] = USR_WORKSPACE + sysWorkspaceSize;
 
     // 16. Log results
-    OP_LOGI(context, "Tiling Key: %u", tilingKey);
-    OP_LOGI(context, "Block Dim: %u (useCore: %u, groupSize: %u)", usedcore, useCoreNum, *groupSizePtr);
-    OP_LOGI(context, "numRow: %u, numCol: %u, multiRowNum: %u, ubFactor: %u",
+    OPS_LOG_I(context->GetNodeName(), "Tiling Key: %u", tilingKey);
+    OPS_LOG_I(context->GetNodeName(), "Block Dim: %u (useCore: %u, groupSize: %u)", usedcore, useCoreNum, *groupSizePtr);
+    OPS_LOG_I(context->GetNodeName(), "numRow: %u, numCol: %u, multiRowNum: %u, ubFactor: %u",
             numRow, numCol, multiRowNum, ubFactor);
-    OP_LOGI(context, "rowLen: %llu, rowTotalNum: %llu, groupSize: %llu",
+    OPS_LOG_I(context->GetNodeName(), "rowLen: %llu, rowTotalNum: %llu, groupSize: %llu",
             rowLen, rowTotalNum, (uint64_t)*groupSizePtr);
-    OP_LOGI(context, "epsilon: %f, avgFactor: %f", epsilon, tilingData.avgFactor);
-    OP_LOGI(context, "headCoreNum: %u, rowPerHeadCore: %u, rowPerTailCore: %u",
+    OPS_LOG_I(context->GetNodeName(), "epsilon: %f, avgFactor: %f", epsilon, tilingData->avgFactor);
+    OPS_LOG_I(context->GetNodeName(), "headCoreNum: %u, rowPerHeadCore: %u, rowPerTailCore: %u",
             headCoreNum, rowPerHeadCore, rowPerTailCore);
-    OP_LOGI(context, "Exit TilingAddRmsNormDynamicQuantAG");
+    OPS_LOG_I(context->GetNodeName(), "Exit TilingAddRmsNormDynamicQuantAG");
 
     return ge::GRAPH_SUCCESS;
 }

@@ -108,7 +108,7 @@ public:
         gammaGm.SetGlobalBuffer((__gm__ T*)gamma, numCol);
 
         // === Quantized output redirected to HCCL window ===
-        uint32_t offsetScale = this->rowTotalNum * sizeof(float);
+        uint32_t offsetScale = this->rowTotalNum *  this->rowLen;
         yQuantGm.SetGlobalBuffer(
             (__gm__ int8_t*)this->buff[this->rankId] + rowOffset * numCol, rowWork * numCol);
         scaleGm.SetGlobalBuffer(
