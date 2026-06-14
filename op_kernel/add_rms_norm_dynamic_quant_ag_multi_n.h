@@ -279,13 +279,15 @@ private:
             PipeBarrier<PIPE_V>();
 
             WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
-            Cast(x1Block, xFp32Block, RoundMode::CAST_NONE, curElems);
-            PipeBarrier<PIPE_V>();
 
             WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
+            Cast(sqxBlock, x2Block, RoundMode::CAST_NONE, numCol);   // gamma FP16 → FP32
+            PipeBarrier<PIPE_V>();
             for (uint32_t r = 0; r < curRows; r++) {
-                Mul(x1Block[r * numCol], x2Block, x1Block[r * numCol], numCol);
+                Mul(xFp32Block[r * numCol], sqxBlock, xFp32Block[r * numCol], numCol);  // FP32 mul
             }
+            PipeBarrier<PIPE_V>();
+            Cast(x1Block, xFp32Block, RoundMode::CAST_NONE, curElems);  // FP32 → FP16
             PipeBarrier<PIPE_V>();
 
             // Stage 3: DynamicQuant (FP32)
@@ -458,20 +460,16 @@ private:
             }
             PipeBarrier<PIPE_V>();
 
+            // Multiply by gamma in FP32 (skip intermediate BF16 round-trip)
             WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
-            Cast(x1Block, xFp32Block, RoundMode::CAST_RINT, curElems);
-            PipeBarrier<PIPE_V>();
-
             WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
-            Cast(xFp32Block, x1Block, RoundMode::CAST_NONE, curElems);
-            PipeBarrier<PIPE_V>();
-            Cast(sqxBlock, x2Block, RoundMode::CAST_NONE, numCol);
+            Cast(sqxBlock, x2Block, RoundMode::CAST_NONE, numCol);   // gamma BF16 → FP32
             PipeBarrier<PIPE_V>();
             for (uint32_t r = 0; r < curRows; r++) {
-                Mul(xFp32Block[r * numCol], sqxBlock, xFp32Block[r * numCol], numCol);
+                Mul(xFp32Block[r * numCol], sqxBlock, xFp32Block[r * numCol], numCol);  // FP32 mul
             }
             PipeBarrier<PIPE_V>();
-            Cast(x1Block, xFp32Block, RoundMode::CAST_RINT, curElems);
+            Cast(x1Block, xFp32Block, RoundMode::CAST_RINT, curElems);  // FP32 → BF16
             PipeBarrier<PIPE_V>();
 
             // Stage 3: DynamicQuant (FP32)

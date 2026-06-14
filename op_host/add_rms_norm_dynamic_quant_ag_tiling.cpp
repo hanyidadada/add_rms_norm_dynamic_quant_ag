@@ -248,7 +248,9 @@ static void CalculateMultiCoreDistribution(
     uint32_t& headCoreNum, uint32_t& rowPerHeadCore, uint32_t& rowPerTailCore)
 {
     rowPerHeadCore = CeilDiv(numRow, numCore);
-    uint32_t tailCoreNum = numRow % numCore;
+    // tailCoreNum = rowPerHeadCore * numCore - numRow
+    // (NOT numRow % numCore — that's based on floor division, mismatched with CeilDiv)
+    uint32_t tailCoreNum = rowPerHeadCore * numCore - numRow;
     if (tailCoreNum == 0) {
         headCoreNum = numCore;
         rowPerTailCore = rowPerHeadCore;

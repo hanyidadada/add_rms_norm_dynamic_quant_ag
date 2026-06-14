@@ -237,14 +237,14 @@ private:
             Muls(xFp32Local, xFp32Local, rstdValue, numCol);
             PipeBarrier<PIPE_V>();
 
-            // Cast FP32 → FP16 (intermediate RmsNorm result, stays in UB)
+            // Multiply by gamma in FP32 for precision (reuse sqxLocal for gamma_fp32)
             WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
-            Cast(x1Local, xFp32Local, RoundMode::CAST_NONE, numCol);
-            PipeBarrier<PIPE_V>();
-
-            // Multiply by gamma (FP16)
             WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
-            Mul(x1Local, x1Local, x2Local, numCol);
+            Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);   // gamma FP16 → FP32
+            PipeBarrier<PIPE_V>();
+            Mul(xFp32Local, xFp32Local, sqxLocal, numCol);            // FP32 mul
+            PipeBarrier<PIPE_V>();
+            Cast(x1Local, xFp32Local, RoundMode::CAST_NONE, numCol);  // FP32 → FP16
             PipeBarrier<PIPE_V>();
 
             // ================================================================
@@ -413,26 +413,14 @@ private:
             Muls(xFp32Local, xFp32Local, rstdValue, numCol);
             PipeBarrier<PIPE_V>();
 
-            // Cast FP32 → BF16
+            // Multiply by gamma in FP32 (skip intermediate BF16 round-trip)
             WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
-            Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
-            PipeBarrier<PIPE_V>();
-
-            // Cast BF16 → FP32 for gamma multiplication (BF16 * BF16 not directly supported)
-            Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
-            PipeBarrier<PIPE_V>();
-
-            // Load gamma into FP32
             WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
-            Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);
+            Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);   // gamma BF16 → FP32
             PipeBarrier<PIPE_V>();
-
-            // Multiply by gamma (FP32)
-            Mul(xFp32Local, xFp32Local, sqxLocal, numCol);
+            Mul(xFp32Local, xFp32Local, sqxLocal, numCol);            // FP32 mul
             PipeBarrier<PIPE_V>();
-
-            // Cast back to BF16
-            Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
+            Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);  // FP32 → BF16
             PipeBarrier<PIPE_V>();
 
             // ================================================================
