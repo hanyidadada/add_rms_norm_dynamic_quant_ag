@@ -32,6 +32,7 @@ constexpr int32_t NUM_PER_REP_FP32 = 64;   // ONE_REPEAT_BYTE_SIZE / sizeof(floa
 constexpr int32_t NUM_PER_BLK_FP32 = 8;
 constexpr int32_t NUM_PER_REP_HALF = 128;  // ONE_REPEAT_BYTE_SIZE / sizeof(half)
 constexpr int32_t BLOCK_ALIGN_NUM = 16;
+constexpr uint32_t MAX_REPEAT = 255;
 constexpr float ZERO_F = 0.0f;
 constexpr float ONE_F = 1.0f;
 constexpr float MINUS_HALF_F = -0.5f;
@@ -170,8 +171,17 @@ __aicore__ inline void ReduceMaxInplace(const LocalTensor<float>& src_local, uin
     uint64_t remsFp32 = count & 0x3f;     // count % 64
 
     if (likely(repsFp32 > 1)) {
-        Max(src_local, src_local[NUM_PER_REP_FP32], src_local, NUM_PER_REP_FP32, repsFp32 - 1,
-            {1, 1, 1, 0, 8, 0});
+        // 8 is rep stride
+        if (repsFp32 - 1 > MAX_REPEAT) {
+            Max(src_local, src_local[NUM_PER_REP_FP32], src_local, NUM_PER_REP_FP32, MAX_REPEAT,
+                {1, 1, 1, 0, 8, 0});
+            PipeBarrier<PIPE_V>();
+            Max(src_local, src_local[NUM_PER_REP_FP32 * MAX_REPEAT], src_local, NUM_PER_REP_FP32,
+                repsFp32 - MAX_REPEAT - 1, {1, 1, 1, 0, 8, 0});
+        } else {
+            Max(src_local, src_local[NUM_PER_REP_FP32], src_local, NUM_PER_REP_FP32, repsFp32 - 1,
+                {1, 1, 1, 0, 8, 0});
+        }
         PipeBarrier<PIPE_V>();
     }
     if (unlikely(remsFp32 > 0) && unlikely(offsetsFp32 > 0)) {
@@ -179,8 +189,8 @@ __aicore__ inline void ReduceMaxInplace(const LocalTensor<float>& src_local, uin
         PipeBarrier<PIPE_V>();
     }
     uint32_t mask = repsFp32 > 0 ? NUM_PER_REP_FP32 : count;
+    // 8 is rep stride
     WholeReduceMax(src_local, src_local, mask, 1, 8, 1, 8);
-    PipeBarrier<PIPE_V>();
 }
 
 // ========== Quantization ==========

@@ -279,15 +279,13 @@ private:
             PipeBarrier<PIPE_V>();
 
             WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
+            Cast(x1Block, xFp32Block, RoundMode::CAST_NONE, curElems);
+            PipeBarrier<PIPE_V>();
 
             WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
-            Cast(sqxBlock, x2Block, RoundMode::CAST_NONE, numCol);   // gamma FP16 → FP32
-            PipeBarrier<PIPE_V>();
             for (uint32_t r = 0; r < curRows; r++) {
-                Mul(xFp32Block[r * numCol], sqxBlock, xFp32Block[r * numCol], numCol);  // FP32 mul
+                Mul(x1Block[r * numCol], x2Block, x1Block[r * numCol], numCol);
             }
-            PipeBarrier<PIPE_V>();
-            Cast(x1Block, xFp32Block, RoundMode::CAST_NONE, curElems);  // FP32 → FP16
             PipeBarrier<PIPE_V>();
 
             // Stage 3: DynamicQuant (FP32)
@@ -298,34 +296,22 @@ private:
             PipeBarrier<PIPE_V>();
 
             for (uint32_t r = 0; r < curRows; r++) {
-                LocalTensor<float> rowMaxLocal = sqxBlock[r * numCol];
-                Duplicate(rstdBlock[r * NUM_PER_BLK_FP32], ZERO_F, NUM_PER_BLK_FP32);
-                PipeBarrier<PIPE_V>();
-                uint64_t repsFp32 = numCol >> 6;
-                uint64_t offsetsFp32 = repsFp32 << 6;
-                uint64_t remsFp32 = numCol & 0x3f;
-                if (likely(repsFp32 > 0)) {
-                    Max(rstdBlock[r * NUM_PER_BLK_FP32], rowMaxLocal, rstdBlock[r * NUM_PER_BLK_FP32],
-                        NUM_PER_REP_FP32, repsFp32, {1, 1, 0, 1, DEFAULT_REPEAT_STRIDE, 0});
-                    PipeBarrier<PIPE_V>();
-                }
-                if (unlikely(remsFp32 > 0)) {
-                    Max(rstdBlock[r * NUM_PER_BLK_FP32], rowMaxLocal[offsetsFp32],
-                        rstdBlock[r * NUM_PER_BLK_FP32], remsFp32, 1,
-                        {1, 1, 0, 1, DEFAULT_REPEAT_STRIDE, 0});
-                    PipeBarrier<PIPE_V>();
-                }
-                uint32_t mask = repsFp32 > 0 ? NUM_PER_REP_FP32 : numCol;
-                WholeReduceMax(rstdBlock[r * NUM_PER_BLK_FP32], rstdBlock[r * NUM_PER_BLK_FP32],
-                    mask, 1, 8, 1, 8);
-                PipeBarrier<PIPE_V>();
+                ReduceMaxInplace(sqxBlock[r * numCol], numCol);
             }
+            PipeBarrier<PIPE_V>();
+
+            // Compute invScale via Div (matches standalone dynamic_quant)
+            LocalTensor<float> constScale = tmpBlock;
+            Duplicate<float>(constScale, DYNAMIC_QUANT_INT8_SYM_SCALE, NUM_PER_BLK_FP32);
+            PipeBarrier<PIPE_V>();
+            for (uint32_t r = 0; r < curRows; r++) {
+                Div(sqxBlock[r * numCol], constScale, sqxBlock[r * numCol], 1);
+            }
+            PipeBarrier<PIPE_V>();
 
             for (uint32_t r = 0; r < curRows; r++) {
-                float rowMax = rstdBlock.GetValue(r * NUM_PER_BLK_FP32);
-                float scaleVal = rowMax * DYNAMIC_QUANT_INT8_RECIP_SCALE;
-                float invScale = (rowMax > DYNAMIC_QUANT_EPSILON) ?
-                    (DYNAMIC_QUANT_INT8_SYM_SCALE / rowMax) : 0.0f;
+                float invScale = sqxBlock.GetValue(r * numCol);
+                float scaleVal = 1.0f / invScale;
                 rstdBlock.SetValue(r * NUM_PER_BLK_FP32, scaleVal);
                 Muls(xFp32Block[r * numCol], xFp32Block[r * numCol], invScale, numCol);
             }
@@ -460,16 +446,20 @@ private:
             }
             PipeBarrier<PIPE_V>();
 
-            // Multiply by gamma in FP32 (skip intermediate BF16 round-trip)
             WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
+            Cast(x1Block, xFp32Block, RoundMode::CAST_RINT, curElems);
+            PipeBarrier<PIPE_V>();
+
             WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
-            Cast(sqxBlock, x2Block, RoundMode::CAST_NONE, numCol);   // gamma BF16 → FP32
+            Cast(xFp32Block, x1Block, RoundMode::CAST_NONE, curElems);
+            PipeBarrier<PIPE_V>();
+            Cast(sqxBlock, x2Block, RoundMode::CAST_NONE, numCol);
             PipeBarrier<PIPE_V>();
             for (uint32_t r = 0; r < curRows; r++) {
-                Mul(xFp32Block[r * numCol], sqxBlock, xFp32Block[r * numCol], numCol);  // FP32 mul
+                Mul(xFp32Block[r * numCol], sqxBlock, xFp32Block[r * numCol], numCol);
             }
             PipeBarrier<PIPE_V>();
-            Cast(x1Block, xFp32Block, RoundMode::CAST_RINT, curElems);  // FP32 → BF16
+            Cast(x1Block, xFp32Block, RoundMode::CAST_RINT, curElems);
             PipeBarrier<PIPE_V>();
 
             // Stage 3: DynamicQuant (FP32)
@@ -482,12 +472,20 @@ private:
             for (uint32_t r = 0; r < curRows; r++) {
                 ReduceMaxInplace(sqxBlock[r * numCol], numCol);
             }
+            PipeBarrier<PIPE_V>();
+
+            // Compute invScale via Div (matches standalone dynamic_quant)
+            LocalTensor<float> constScaleBf16 = tmpBlock;
+            Duplicate<float>(constScaleBf16, DYNAMIC_QUANT_INT8_SYM_SCALE, NUM_PER_BLK_FP32);
+            PipeBarrier<PIPE_V>();
+            for (uint32_t r = 0; r < curRows; r++) {
+                Div(sqxBlock[r * numCol], constScaleBf16, sqxBlock[r * numCol], 1);
+            }
+            PipeBarrier<PIPE_V>();
 
             for (uint32_t r = 0; r < curRows; r++) {
-                float rowMax = sqxBlock.GetValue(r * numCol);
-                float scaleVal = rowMax * DYNAMIC_QUANT_INT8_RECIP_SCALE;
-                float invScale = (rowMax > DYNAMIC_QUANT_EPSILON) ?
-                    (DYNAMIC_QUANT_INT8_SYM_SCALE / rowMax) : 0.0f;
+                float invScale = sqxBlock.GetValue(r * numCol);
+                float scaleVal = 1.0f / invScale;
                 rstdBlock.SetValue(r * NUM_PER_BLK_FP32, scaleVal);
                 Muls(xFp32Block[r * numCol], xFp32Block[r * numCol], invScale, numCol);
             }

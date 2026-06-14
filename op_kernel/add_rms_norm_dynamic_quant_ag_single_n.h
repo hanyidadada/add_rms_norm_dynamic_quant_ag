@@ -237,14 +237,14 @@ private:
             Muls(xFp32Local, xFp32Local, rstdValue, numCol);
             PipeBarrier<PIPE_V>();
 
-            // Multiply by gamma in FP32 for precision (reuse sqxLocal for gamma_fp32)
+            // Cast FP32 → FP16 (intermediate RmsNorm result, stays in UB)
             WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
+            Cast(x1Local, xFp32Local, RoundMode::CAST_NONE, numCol);
+            PipeBarrier<PIPE_V>();
+
+            // Multiply by gamma (FP16, matches standalone add_rms_norm)
             WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
-            Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);   // gamma FP16 → FP32
-            PipeBarrier<PIPE_V>();
-            Mul(xFp32Local, xFp32Local, sqxLocal, numCol);            // FP32 mul
-            PipeBarrier<PIPE_V>();
-            Cast(x1Local, xFp32Local, RoundMode::CAST_NONE, numCol);  // FP32 → FP16
+            Mul(x1Local, x1Local, x2Local, numCol);
             PipeBarrier<PIPE_V>();
 
             // ================================================================
@@ -261,22 +261,26 @@ private:
 
             // Reduce max in-place: find row-wise max(abs) in sqxLocal[0]
             ReduceMaxInplace(sqxLocal, numCol);
+            PipeBarrier<PIPE_V>();
 
-            // Extract max value
+            // Compute invScale = 127.0 / rowMax via Div (matches standalone dynamic_quant)
+            LocalTensor<float> constScale = tmpLocal;
+            Duplicate<float>(constScale, DYNAMIC_QUANT_INT8_SYM_SCALE, 1);
+            PipeBarrier<PIPE_V>();
+            Div(sqxLocal, constScale, sqxLocal, 1);
+            PipeBarrier<PIPE_V>();
+
+            // Extract invScale scalar
             event_t eventVS2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
             SetFlag<HardEvent::V_S>(eventVS2);
             WaitFlag<HardEvent::V_S>(eventVS2);
-            float rowMax = sqxLocal.GetValue(0);
+            float invScale = sqxLocal.GetValue(0);
             event_t eventSV2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
             SetFlag<HardEvent::S_V>(eventSV2);
             WaitFlag<HardEvent::S_V>(eventSV2);
 
-            // scale = rowMax / 127.0
-            float scaleVal = rowMax * DYNAMIC_QUANT_INT8_RECIP_SCALE;
-
-            // invScale = 127.0 / rowMax (with epsilon guard)
-            float invScale = (rowMax > DYNAMIC_QUANT_EPSILON) ?
-                (DYNAMIC_QUANT_INT8_SYM_SCALE / rowMax) : 0.0f;
+            // scaleOut = 1.0 / invScale = max_abs / 127.0 (matches standalone dynamic_quant)
+            float scaleVal = 1.0f / invScale;
 
             // Copy out scale
             sqxLocal.SetValue(0, scaleVal);
@@ -413,14 +417,26 @@ private:
             Muls(xFp32Local, xFp32Local, rstdValue, numCol);
             PipeBarrier<PIPE_V>();
 
-            // Multiply by gamma in FP32 (skip intermediate BF16 round-trip)
+            // Cast FP32 → BF16
             WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
+            Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
+            PipeBarrier<PIPE_V>();
+
+            // Cast BF16 → FP32 for gamma multiplication (BF16 * BF16 not directly supported)
+            Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
+            PipeBarrier<PIPE_V>();
+
+            // Load gamma into FP32
             WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
-            Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);   // gamma BF16 → FP32
+            Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);
             PipeBarrier<PIPE_V>();
-            Mul(xFp32Local, xFp32Local, sqxLocal, numCol);            // FP32 mul
+
+            // Multiply by gamma (FP32)
+            Mul(xFp32Local, xFp32Local, sqxLocal, numCol);
             PipeBarrier<PIPE_V>();
-            Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);  // FP32 → BF16
+
+            // Cast back to BF16
+            Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
             PipeBarrier<PIPE_V>();
 
             // ================================================================
@@ -437,19 +453,26 @@ private:
 
             // Reduce max
             ReduceMaxInplace(sqxLocal, numCol);
+            PipeBarrier<PIPE_V>();
 
-            // Extract max
+            // Compute invScale via Div (matches standalone dynamic_quant)
+            LocalTensor<float> constScaleBf16 = tmpLocal;
+            Duplicate<float>(constScaleBf16, DYNAMIC_QUANT_INT8_SYM_SCALE, 1);
+            PipeBarrier<PIPE_V>();
+            Div(sqxLocal, constScaleBf16, sqxLocal, 1);
+            PipeBarrier<PIPE_V>();
+
+            // Extract invScale scalar
             event_t eventVS2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
             SetFlag<HardEvent::V_S>(eventVS2);
             WaitFlag<HardEvent::V_S>(eventVS2);
-            float rowMax = sqxLocal.GetValue(0);
+            float invScale = sqxLocal.GetValue(0);
             event_t eventSV2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
             SetFlag<HardEvent::S_V>(eventSV2);
             WaitFlag<HardEvent::S_V>(eventSV2);
 
-            float scaleVal = rowMax * DYNAMIC_QUANT_INT8_RECIP_SCALE;
-            float invScale = (rowMax > DYNAMIC_QUANT_EPSILON) ?
-                (DYNAMIC_QUANT_INT8_SYM_SCALE / rowMax) : 0.0f;
+            // scaleOut = 1.0 / invScale = max_abs / 127.0
+            float scaleVal = 1.0f / invScale;
 
             // Copy out scale
             sqxLocal.SetValue(0, scaleVal);
