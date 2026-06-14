@@ -143,7 +143,14 @@ __aicore__ inline void ReduceSumCustom(
         Add(work_local, src_local[reduceBodyCount], work_local, reduceTailCount, 1, reduceRepeatParams);
         PipeBarrier<PIPE_V>();
     }
-    BlockReduceSum(dst_local, work_local, 1, reduceMask, 1, 1, DEFAULT_REPEAT_STRIDE);
+    AscendCUtils::SetMask<float>(NUM_PER_REP_FP32);
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+    if (g_coreType == AIV) {
+        WholeReduceSum<float, false>(dst_local, work_local, MASK_PLACEHOLDER, 1, 0, 1, 0);
+    }
+#elif !(defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113))
+    WholeReduceSum<float, false>(dst_local, work_local, MASK_PLACEHOLDER, 1, 1, 1, DEFAULT_REPEAT_STRIDE);
+#endif
     PipeBarrier<PIPE_V>();
 }
 
