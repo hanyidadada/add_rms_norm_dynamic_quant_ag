@@ -17,6 +17,7 @@
 #define ADD_RMS_NORM_DYNAMIC_QUANT_AG_BASE_H_
 
 #include "kernel_operator.h"
+#include "reduce_common.h"
 #include "add_rms_norm_dynamic_quant_ag_tiling.h"
 
 using namespace AscendC;
@@ -114,33 +115,32 @@ __aicore__ inline void DataCopyCustom(const U& dstTensor, const R& srcTensor, co
 #endif
 }
 
-// ========== Reduce Operations ==========
+// ========== Reduce Operations (verbatim from SDK rms_norm_base.h) ==========
 
-__aicore__ inline void ReduceSumCustom(
+__aicore__ inline void ReduceSumFP32(
     const LocalTensor<float>& dst_local, const LocalTensor<float>& src_local,
     const LocalTensor<float>& work_local, int32_t count)
 {
-    uint64_t reduceMask = NUM_PER_REP_FP32;
-    int32_t reduceRepeatTimes = count / NUM_PER_REP_FP32;
-    int32_t reduceTailCount = count % NUM_PER_REP_FP32;
-    int32_t reduceBodyCount = reduceRepeatTimes * NUM_PER_REP_FP32;
-
-    BinaryRepeatParams reduceRepeatParams;
-    reduceRepeatParams.src0RepStride = ONE_REPEAT_BYTE_SIZE / ONE_BLK_SIZE;
-    reduceRepeatParams.src0BlkStride = 1;
-    reduceRepeatParams.src1RepStride = 0;
-    reduceRepeatParams.src1BlkStride = 1;
-    reduceRepeatParams.dstRepStride = 0;
-    reduceRepeatParams.dstBlkStride = 1;
-
+    // count need smaller than 255 repeat
+    uint64_t mask = NUM_PER_REP_FP32;
+    int32_t repeatTimes = count / NUM_PER_REP_FP32;
+    int32_t tailCount = count % NUM_PER_REP_FP32;
+    int32_t bodyCount = repeatTimes * NUM_PER_REP_FP32;
+    BinaryRepeatParams repeatParams;
+    repeatParams.src0RepStride = ONE_REPEAT_BYTE_SIZE / ONE_BLK_SIZE;
+    repeatParams.src0BlkStride = 1;
+    repeatParams.src1RepStride = 0;
+    repeatParams.src1BlkStride = 1;
+    repeatParams.dstRepStride = 0;
+    repeatParams.dstBlkStride = 1;
     Duplicate(work_local, ZERO_F, NUM_PER_REP_FP32);
     PipeBarrier<PIPE_V>();
-    if (likely(reduceRepeatTimes > 0)) {
-        Add(work_local, src_local, work_local, reduceMask, reduceRepeatTimes, reduceRepeatParams);
+    if (likely(repeatTimes > 0)) {
+        Add(work_local, src_local, work_local, mask, repeatTimes, repeatParams);
         PipeBarrier<PIPE_V>();
     }
-    if (unlikely(reduceTailCount != 0)) {
-        Add(work_local, src_local[reduceBodyCount], work_local, reduceTailCount, 1, reduceRepeatParams);
+    if (unlikely(tailCount != 0)) {
+        Add(work_local, src_local[bodyCount], work_local, tailCount, 1, repeatParams);
         PipeBarrier<PIPE_V>();
     }
     AscendCUtils::SetMask<float>(NUM_PER_REP_FP32);
@@ -152,6 +152,13 @@ __aicore__ inline void ReduceSumCustom(
     WholeReduceSum<float, false>(dst_local, work_local, MASK_PLACEHOLDER, 1, 1, 1, DEFAULT_REPEAT_STRIDE);
 #endif
     PipeBarrier<PIPE_V>();
+}
+
+__aicore__ inline void ReduceSumCustom(
+    const LocalTensor<float>& dst_local, const LocalTensor<float>& src_local,
+    const LocalTensor<float>& work_local, int32_t count)
+{
+    ReduceSumFP32(dst_local, src_local, work_local, count);
 }
 
 __aicore__ inline void BlockReduceSumFP32(
