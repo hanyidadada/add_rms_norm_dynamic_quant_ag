@@ -17,7 +17,7 @@
 #define ADD_RMS_NORM_DYNAMIC_QUANT_AG_ADPT_H
 
 namespace vllm_ascend {
-std::tuple<at::Tensor, at::Tensor, at::Tensor> add_rms_norm_dynamic_quant_ag(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> add_rms_norm_dynamic_quant_ag(
     const at::Tensor& x1, const at::Tensor& x2, const at::Tensor& gamma,
     c10::string_view group, int64_t group_size, double epsilon)
 {
@@ -42,7 +42,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> add_rms_norm_dynamic_quant_ag(
     at::Tensor rstd = at::empty(rstd_size, x1.options().dtype(scale_dtype));
 
     EXEC_NPU_CMD(aclnnAddRmsNormDynamicQuantAG, x1, x2, gamma, epsilon, dst_type, group_ptr, group_size, y1, scale, x_out, rstd);
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y1, scale, x_out);
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>(y1, scale, x_out, rstd);
 }
 }
 #endif
