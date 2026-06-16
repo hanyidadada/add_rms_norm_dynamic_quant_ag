@@ -58,12 +58,8 @@ public:
         }
 
         // Guard: cores beyond useCoreNum are AG-only (groupSize > useCoreNum)
-        // useCoreNum = headCoreNum when rowPerTailCore==0, else numCore
-        {
-            uint32_t useCoreNum = (this->rowPerTailCore > 0) ? tiling->coreNum : this->headCoreNum;
-            if (this->blockIdx_ >= useCoreNum) {
-                this->rowWork = 0;
-            }
+        if (this->blockIdx_ >= tiling->coreNum) {
+            this->rowWork = 0;
         }
 
         this->rowWork_ = this->rowWork;
@@ -297,10 +293,10 @@ private:
             Muls(xFp32Local, xFp32Local, invScale, numCol);
             PipeBarrier<PIPE_V>();
 
-            // Quantize: FP32 → INT32 (round) → FP16 (round) → INT8 (trunc)
-            LocalTensor<int32_t> tmpInt32Local = tmpLocal.template ReinterpretCast<int32_t>();
+            // Quantize: FP32 → INT16 (round) → FP16 (round) → INT8 (trunc)
+            LocalTensor<int16_t> tmpInt16Local = tmpLocal.template ReinterpretCast<int16_t>();
             LocalTensor<half> tmpHalfLocal = tmpLocal.template ReinterpretCast<half>();
-            QuantizeFp32ToInt8(outInt8Local, xFp32Local, tmpInt32Local, tmpHalfLocal, numCol);
+            QuantizeFp32ToInt8(outInt8Local, xFp32Local, tmpInt16Local, tmpHalfLocal, numCol);
 
             // Copy out yQuant
             event_t eventVMTE3Quant = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
@@ -490,9 +486,9 @@ private:
             PipeBarrier<PIPE_V>();
 
             // Quantize
-            LocalTensor<int32_t> tmpInt32Local = tmpLocal.template ReinterpretCast<int32_t>();
+            LocalTensor<int16_t> tmpInt16Local = tmpLocal.template ReinterpretCast<int16_t>();
             LocalTensor<half> tmpHalfLocal = tmpLocal.template ReinterpretCast<half>();
-            QuantizeFp32ToInt8(outInt8Local, xFp32Local, tmpInt32Local, tmpHalfLocal, numCol);
+            QuantizeFp32ToInt8(outInt8Local, xFp32Local, tmpInt16Local, tmpHalfLocal, numCol);
 
             // Copy out yQuant
             event_t eventVMTE3Quant = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));

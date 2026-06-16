@@ -245,18 +245,22 @@ static uint32_t GetDtypeKey(ge::DataType dataType)
 
 static void CalculateMultiCoreDistribution(
     uint32_t numRow, uint32_t numCore,
-    uint32_t& headCoreNum, uint32_t& rowPerHeadCore, uint32_t& rowPerTailCore)
+    uint32_t& headCoreNum, uint32_t& rowPerHeadCore, uint32_t& rowPerTailCore,
+    uint32_t& useCoreNum)
 {
     // Align with standalone add_rms_norm CalculateBlockParameters:
-    // All cores get same blockFactor rows, last core gets latsBlockFactor rows
-    rowPerHeadCore = CeilDiv(numRow, numCore);
-    uint32_t tailCoreNum = rowPerHeadCore * numCore - numRow;
+    // When numRow < numCore, limit cores to numRow (each core gets at least 1 row,
+    // matching standalone's useCoreNum = CeilDiv(numRow, blockFactor) with blockFactor=1).
+    uint32_t effectiveNumCore = std::min(numRow, numCore);
+    useCoreNum = effectiveNumCore;
+    rowPerHeadCore = CeilDiv(numRow, effectiveNumCore);
+    uint32_t tailCoreNum = rowPerHeadCore * effectiveNumCore - numRow;
     if (tailCoreNum == 0) {
-        headCoreNum = numCore;
+        headCoreNum = effectiveNumCore;
         rowPerTailCore = rowPerHeadCore;
     } else {
-        headCoreNum = numCore - 1;
-        rowPerTailCore = numRow - rowPerHeadCore * (numCore - 1);
+        headCoreNum = effectiveNumCore - 1;
+        rowPerTailCore = numRow - rowPerHeadCore * (effectiveNumCore - 1);
     }
 }
 
@@ -344,7 +348,8 @@ static ge::graphStatus TilingAddRmsNormDynamicQuantAG(gert::TilingContext* conte
     uint32_t headCoreNum = 0;
     uint32_t rowPerHeadCore = 0;
     uint32_t rowPerTailCore = 0;
-    CalculateMultiCoreDistribution(numRow, numCore, headCoreNum, rowPerHeadCore, rowPerTailCore);
+    uint32_t useCoreNum = 0;
+    CalculateMultiCoreDistribution(numRow, numCore, headCoreNum, rowPerHeadCore, rowPerTailCore, useCoreNum);
 
     // 7. Determine mode and UB parameters
     uint32_t multiRowNum = 1;
@@ -355,11 +360,7 @@ static ge::graphStatus TilingAddRmsNormDynamicQuantAG(gert::TilingContext* conte
     uint32_t tilingKey = (dtypeKey * 10) + modeKey;
     context->SetTilingKey(tilingKey);
 
-    // 9. Calculate useCoreNum before AG adjustment
-    uint32_t useCoreNum = headCoreNum;
-    if (rowPerTailCore > 0) {
-        useCoreNum = numCore;
-    }
+    // 9. useCoreNum already computed in CalculateMultiCoreDistribution
 
     // 10. Extract AG attributes and compute MC2 parameters
     auto attrs = context->GetAttrs();
@@ -385,7 +386,7 @@ static ge::graphStatus TilingAddRmsNormDynamicQuantAG(gert::TilingContext* conte
     tilingData->epsilon        = epsilon;
     tilingData->avgFactor      = (numCol == 0) ? 0.0f : (1.0f / static_cast<float>(numCol));
     tilingData->dstType        = dstType;
-    tilingData->coreNum        = numCore;
+    tilingData->coreNum        = useCoreNum;
     tilingData->headCoreNum    = headCoreNum;
     tilingData->rowPerHeadCore = rowPerHeadCore;
     tilingData->rowPerTailCore = rowPerTailCore;

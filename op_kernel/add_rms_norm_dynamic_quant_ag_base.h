@@ -212,17 +212,14 @@ __aicore__ inline void ReduceMaxInplace(const LocalTensor<float>& src_local, uin
 __aicore__ inline void QuantizeFp32ToInt8(
     const LocalTensor<int8_t>& outInt8,
     const LocalTensor<float>& xFp32,
-    const LocalTensor<int32_t>& tmpInt32,
+    const LocalTensor<int16_t>& tmpInt16,
     const LocalTensor<half>& tmpHalf,
     uint32_t count)
 {
-    Cast(tmpInt32, xFp32, RoundMode::CAST_RINT, count);
+    Cast(tmpInt16, xFp32, RoundMode::CAST_RINT, count);
     PipeBarrier<PIPE_V>();
 
-    SetDeqScale(static_cast<half>(1.0f));
-    PipeBarrier<PIPE_V>();
-
-    Cast(tmpHalf, tmpInt32, RoundMode::CAST_ROUND, count);
+    Cast(tmpHalf, tmpInt16, RoundMode::CAST_ROUND, count);
     PipeBarrier<PIPE_V>();
 
     Cast(outInt8, tmpHalf, RoundMode::CAST_TRUNC, count);

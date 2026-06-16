@@ -64,12 +64,8 @@ public:
         }
 
         // Guard: cores beyond useCoreNum are AG-only (groupSize > useCoreNum)
-        // useCoreNum = headCoreNum when rowPerTailCore==0, else numCore
-        {
-            uint32_t useCoreNum = (this->rowPerTailCore > 0) ? tiling->coreNum : this->headCoreNum;
-            if (this->blockIdx_ >= useCoreNum) {
-                this->rowWork = 0;
-            }
+        if (this->blockIdx_ >= tiling->coreNum) {
+            this->rowWork = 0;
         }
 
         this->rowWork_ = this->rowWork;
@@ -251,16 +247,20 @@ private:
             Duplicate(tmpBlock, ONE_F, NUM_PER_BLK_FP32);
             PipeBarrier<PIPE_V>();
 
-            int32_t repTimes = curRows * NUM_PER_BLK_FP32 / NUM_PER_REP_FP32;
-            int32_t tailCnt  = curRows * NUM_PER_BLK_FP32 % NUM_PER_REP_FP32;
-            int32_t bodyCnt  = repTimes * NUM_PER_REP_FP32;
-            if (likely(repTimes > 0)) {
-                Div(rstdBlock, tmpBlock, rstdBlock, NUM_PER_REP_FP32, repTimes,
-                    {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
-            }
-            if (unlikely(tailCnt != 0)) {
-                Div(rstdBlock[bodyCnt], tmpBlock, rstdBlock[bodyCnt], tailCnt, 1,
-                    {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
+            if (curRows == 1) {
+                Div(rstdBlock, tmpBlock, rstdBlock, 1);
+            } else {
+                int32_t repTimes = curRows * NUM_PER_BLK_FP32 / NUM_PER_REP_FP32;
+                int32_t tailCnt  = curRows * NUM_PER_BLK_FP32 % NUM_PER_REP_FP32;
+                int32_t bodyCnt  = repTimes * NUM_PER_REP_FP32;
+                if (likely(repTimes > 0)) {
+                    Div(rstdBlock, tmpBlock, rstdBlock, NUM_PER_REP_FP32, repTimes,
+                        {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
+                }
+                if (unlikely(tailCnt != 0)) {
+                    Div(rstdBlock[bodyCnt], tmpBlock, rstdBlock[bodyCnt], tailCnt, 1,
+                        {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
+                }
             }
             PipeBarrier<PIPE_V>();
 
@@ -273,7 +273,13 @@ private:
             DataCopyPad(rstdGm[i_o * multiRowNum], rstdBlock, rstdCopyParams);
 
             for (uint32_t r = 0; r < curRows; r++) {
+                event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+                SetFlag<HardEvent::V_S>(eventVS);
+                WaitFlag<HardEvent::V_S>(eventVS);
                 float rstdVal = rstdBlock.GetValue(r * NUM_PER_BLK_FP32);
+                event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+                SetFlag<HardEvent::S_V>(eventSV);
+                WaitFlag<HardEvent::S_V>(eventSV);
                 Muls(xFp32Block[r * numCol], xFp32Block[r * numCol], rstdVal, numCol);
             }
             PipeBarrier<PIPE_V>();
@@ -310,7 +316,13 @@ private:
             PipeBarrier<PIPE_V>();
 
             for (uint32_t r = 0; r < curRows; r++) {
+                event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+                SetFlag<HardEvent::V_S>(eventVS);
+                WaitFlag<HardEvent::V_S>(eventVS);
                 float invScale = sqxBlock.GetValue(r * numCol);
+                event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+                SetFlag<HardEvent::S_V>(eventSV);
+                WaitFlag<HardEvent::S_V>(eventSV);
                 float scaleVal = 1.0f / invScale;
                 rstdBlock.SetValue(r * NUM_PER_BLK_FP32, scaleVal);
                 Muls(xFp32Block[r * numCol], xFp32Block[r * numCol], invScale, numCol);
@@ -325,9 +337,9 @@ private:
             scaleCopyParams.blockCount = curRows;
             DataCopyPad(scaleGm[i_o * multiRowNum], rstdBlock, scaleCopyParams);
 
-            LocalTensor<int32_t> tmpInt32Block = tmpBlock.template ReinterpretCast<int32_t>();
+            LocalTensor<int16_t> tmpInt16Block = tmpBlock.template ReinterpretCast<int16_t>();
             LocalTensor<half> tmpHalfBlock = tmpBlock.template ReinterpretCast<half>();
-            QuantizeFp32ToInt8(outInt8Block, xFp32Block, tmpInt32Block, tmpHalfBlock, curElems);
+            QuantizeFp32ToInt8(outInt8Block, xFp32Block, tmpInt16Block, tmpHalfBlock, curElems);
 
             event_t eventVMTE3Q = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
             SetFlag<HardEvent::V_MTE3>(eventVMTE3Q);
@@ -419,16 +431,20 @@ private:
             Duplicate(tmpBlock, ONE_F, NUM_PER_BLK_FP32);
             PipeBarrier<PIPE_V>();
 
-            int32_t repTimes = curRows * NUM_PER_BLK_FP32 / NUM_PER_REP_FP32;
-            int32_t tailCnt  = curRows * NUM_PER_BLK_FP32 % NUM_PER_REP_FP32;
-            int32_t bodyCnt  = repTimes * NUM_PER_REP_FP32;
-            if (likely(repTimes > 0)) {
-                Div(rstdBlock, tmpBlock, rstdBlock, NUM_PER_REP_FP32, repTimes,
-                    {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
-            }
-            if (unlikely(tailCnt != 0)) {
-                Div(rstdBlock[bodyCnt], tmpBlock, rstdBlock[bodyCnt], tailCnt, 1,
-                    {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
+            if (curRows == 1) {
+                Div(rstdBlock, tmpBlock, rstdBlock, 1);
+            } else {
+                int32_t repTimes = curRows * NUM_PER_BLK_FP32 / NUM_PER_REP_FP32;
+                int32_t tailCnt  = curRows * NUM_PER_BLK_FP32 % NUM_PER_REP_FP32;
+                int32_t bodyCnt  = repTimes * NUM_PER_REP_FP32;
+                if (likely(repTimes > 0)) {
+                    Div(rstdBlock, tmpBlock, rstdBlock, NUM_PER_REP_FP32, repTimes,
+                        {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
+                }
+                if (unlikely(tailCnt != 0)) {
+                    Div(rstdBlock[bodyCnt], tmpBlock, rstdBlock[bodyCnt], tailCnt, 1,
+                        {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
+                }
             }
             PipeBarrier<PIPE_V>();
 
@@ -441,7 +457,13 @@ private:
             DataCopyPad(rstdGm[i_o * multiRowNum], rstdBlock, rstdCopyParams);
 
             for (uint32_t r = 0; r < curRows; r++) {
+                event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+                SetFlag<HardEvent::V_S>(eventVS);
+                WaitFlag<HardEvent::V_S>(eventVS);
                 float rstdVal = rstdBlock.GetValue(r * NUM_PER_BLK_FP32);
+                event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+                SetFlag<HardEvent::S_V>(eventSV);
+                WaitFlag<HardEvent::S_V>(eventSV);
                 Muls(xFp32Block[r * numCol], xFp32Block[r * numCol], rstdVal, numCol);
             }
             PipeBarrier<PIPE_V>();
@@ -484,7 +506,13 @@ private:
             PipeBarrier<PIPE_V>();
 
             for (uint32_t r = 0; r < curRows; r++) {
+                event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+                SetFlag<HardEvent::V_S>(eventVS);
+                WaitFlag<HardEvent::V_S>(eventVS);
                 float invScale = sqxBlock.GetValue(r * numCol);
+                event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+                SetFlag<HardEvent::S_V>(eventSV);
+                WaitFlag<HardEvent::S_V>(eventSV);
                 float scaleVal = 1.0f / invScale;
                 rstdBlock.SetValue(r * NUM_PER_BLK_FP32, scaleVal);
                 Muls(xFp32Block[r * numCol], xFp32Block[r * numCol], invScale, numCol);
@@ -499,9 +527,9 @@ private:
             scaleCopyParams.blockCount = curRows;
             DataCopyPad(scaleGm[i_o * multiRowNum], rstdBlock, scaleCopyParams);
 
-            LocalTensor<int32_t> tmpInt32Block = tmpBlock.template ReinterpretCast<int32_t>();
+            LocalTensor<int16_t> tmpInt16Block = tmpBlock.template ReinterpretCast<int16_t>();
             LocalTensor<half> tmpHalfBlock = tmpBlock.template ReinterpretCast<half>();
-            QuantizeFp32ToInt8(outInt8Block, xFp32Block, tmpInt32Block, tmpHalfBlock, curElems);
+            QuantizeFp32ToInt8(outInt8Block, xFp32Block, tmpInt16Block, tmpHalfBlock, curElems);
 
             event_t eventVMTE3Q = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
             SetFlag<HardEvent::V_MTE3>(eventVMTE3Q);
