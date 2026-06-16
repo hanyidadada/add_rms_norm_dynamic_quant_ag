@@ -342,9 +342,9 @@ private:
             }
             PipeBarrier<PIPE_V>();
 
-            LocalTensor<int16_t> tmpInt16Block = tmpBlock.template ReinterpretCast<int16_t>();
+            LocalTensor<int32_t> tmpInt32Block = tmpBlock.template ReinterpretCast<int32_t>();
             LocalTensor<half> tmpHalfBlock = tmpBlock.template ReinterpretCast<half>();
-            QuantizeFp32ToInt8(outInt8Block, xFp32Block, tmpInt16Block, tmpHalfBlock, curElems);
+            QuantizeFp32ToInt8(outInt8Block, xFp32Block, tmpInt32Block, tmpHalfBlock, curElems);
 
             // Compact scale values from stride-8 (rstdBlock) to stride-1 (tmpBlock) before GM copy
             for (uint32_t r = 0; r < curRows; r++) {
@@ -558,9 +558,9 @@ private:
             }
             PipeBarrier<PIPE_V>();
 
-            LocalTensor<int16_t> tmpInt16Block = tmpBlock.template ReinterpretCast<int16_t>();
+            LocalTensor<int32_t> tmpInt32Block = tmpBlock.template ReinterpretCast<int32_t>();
             LocalTensor<half> tmpHalfBlock = tmpBlock.template ReinterpretCast<half>();
-            QuantizeFp32ToInt8(outInt8Block, xFp32Block, tmpInt16Block, tmpHalfBlock, curElems);
+            QuantizeFp32ToInt8(outInt8Block, xFp32Block, tmpInt32Block, tmpHalfBlock, curElems);
 
             // Compact scale values from stride-8 (rstdBlock) to stride-1 (tmpBlock) before GM copy
             for (uint32_t r = 0; r < curRows; r++) {

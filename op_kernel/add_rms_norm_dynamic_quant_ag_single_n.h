@@ -294,9 +294,9 @@ private:
             PipeBarrier<PIPE_V>();
 
             // Quantize: FP32 → INT16 (round) → FP16 (round) → INT8 (trunc)
-            LocalTensor<int16_t> tmpInt16Local = tmpLocal.template ReinterpretCast<int16_t>();
+            LocalTensor<int32_t> tmpInt32Local = tmpLocal.template ReinterpretCast<int32_t>();
             LocalTensor<half> tmpHalfLocal = tmpLocal.template ReinterpretCast<half>();
-            QuantizeFp32ToInt8(outInt8Local, xFp32Local, tmpInt16Local, tmpHalfLocal, numCol);
+            QuantizeFp32ToInt8(outInt8Local, xFp32Local, tmpInt32Local, tmpHalfLocal, numCol);
 
             // Copy out yQuant
             event_t eventVMTE3Quant = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
@@ -486,9 +486,9 @@ private:
             PipeBarrier<PIPE_V>();
 
             // Quantize
-            LocalTensor<int16_t> tmpInt16Local = tmpLocal.template ReinterpretCast<int16_t>();
+            LocalTensor<int32_t> tmpInt32Local = tmpLocal.template ReinterpretCast<int32_t>();
             LocalTensor<half> tmpHalfLocal = tmpLocal.template ReinterpretCast<half>();
-            QuantizeFp32ToInt8(outInt8Local, xFp32Local, tmpInt16Local, tmpHalfLocal, numCol);
+            QuantizeFp32ToInt8(outInt8Local, xFp32Local, tmpInt32Local, tmpHalfLocal, numCol);
 
             // Copy out yQuant
             event_t eventVMTE3Quant = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
