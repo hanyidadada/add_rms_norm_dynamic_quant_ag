@@ -267,10 +267,6 @@ private:
             event_t eventVMTE3R = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
             SetFlag<HardEvent::V_MTE3>(eventVMTE3R);
             WaitFlag<HardEvent::V_MTE3>(eventVMTE3R);
-            DataCopyParams rstdCopyParams;
-            rstdCopyParams.blockLen = sizeof(float);
-            rstdCopyParams.blockCount = curRows;
-            DataCopyPad(rstdGm[i_o * multiRowNum], rstdBlock, rstdCopyParams);
 
             for (uint32_t r = 0; r < curRows; r++) {
                 event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
@@ -283,6 +279,23 @@ private:
                 Muls(xFp32Block[r * numCol], xFp32Block[r * numCol], rstdVal, numCol);
             }
             PipeBarrier<PIPE_V>();
+
+            // Compact rstd from stride-8 to stride-1 before GM copy
+            for (uint32_t r = 0; r < curRows; r++) {
+                event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+                SetFlag<HardEvent::V_S>(eventVS);
+                WaitFlag<HardEvent::V_S>(eventVS);
+                float rstdVal = rstdBlock.GetValue(r * NUM_PER_BLK_FP32);
+                event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+                SetFlag<HardEvent::S_V>(eventSV);
+                WaitFlag<HardEvent::S_V>(eventSV);
+                tmpBlock.SetValue(r, rstdVal);
+            }
+            PipeBarrier<PIPE_V>();
+            DataCopyParams rstdCopyParams;
+            rstdCopyParams.blockLen = sizeof(float);
+            rstdCopyParams.blockCount = curRows;
+            DataCopyPad(rstdGm[i_o * multiRowNum], tmpBlock, rstdCopyParams);
 
             WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
             Cast(x1Block, xFp32Block, RoundMode::CAST_NONE, curElems);
@@ -329,17 +342,30 @@ private:
             }
             PipeBarrier<PIPE_V>();
 
+            LocalTensor<int16_t> tmpInt16Block = tmpBlock.template ReinterpretCast<int16_t>();
+            LocalTensor<half> tmpHalfBlock = tmpBlock.template ReinterpretCast<half>();
+            QuantizeFp32ToInt8(outInt8Block, xFp32Block, tmpInt16Block, tmpHalfBlock, curElems);
+
+            // Compact scale values from stride-8 (rstdBlock) to stride-1 (tmpBlock) before GM copy
+            for (uint32_t r = 0; r < curRows; r++) {
+                event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+                SetFlag<HardEvent::V_S>(eventVS);
+                WaitFlag<HardEvent::V_S>(eventVS);
+                float sv = rstdBlock.GetValue(r * NUM_PER_BLK_FP32);
+                event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+                SetFlag<HardEvent::S_V>(eventSV);
+                WaitFlag<HardEvent::S_V>(eventSV);
+                tmpBlock.SetValue(r, sv);
+            }
+            PipeBarrier<PIPE_V>();
+
             event_t eventVMTE3S = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
             SetFlag<HardEvent::V_MTE3>(eventVMTE3S);
             WaitFlag<HardEvent::V_MTE3>(eventVMTE3S);
             DataCopyParams scaleCopyParams;
             scaleCopyParams.blockLen = sizeof(float);
             scaleCopyParams.blockCount = curRows;
-            DataCopyPad(scaleGm[i_o * multiRowNum], rstdBlock, scaleCopyParams);
-
-            LocalTensor<int16_t> tmpInt16Block = tmpBlock.template ReinterpretCast<int16_t>();
-            LocalTensor<half> tmpHalfBlock = tmpBlock.template ReinterpretCast<half>();
-            QuantizeFp32ToInt8(outInt8Block, xFp32Block, tmpInt16Block, tmpHalfBlock, curElems);
+            DataCopyPad(scaleGm[i_o * multiRowNum], tmpBlock, scaleCopyParams);
 
             event_t eventVMTE3Q = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
             SetFlag<HardEvent::V_MTE3>(eventVMTE3Q);
@@ -451,10 +477,6 @@ private:
             event_t eventVMTE3R = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
             SetFlag<HardEvent::V_MTE3>(eventVMTE3R);
             WaitFlag<HardEvent::V_MTE3>(eventVMTE3R);
-            DataCopyParams rstdCopyParams;
-            rstdCopyParams.blockLen = sizeof(float);
-            rstdCopyParams.blockCount = curRows;
-            DataCopyPad(rstdGm[i_o * multiRowNum], rstdBlock, rstdCopyParams);
 
             for (uint32_t r = 0; r < curRows; r++) {
                 event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
@@ -467,6 +489,23 @@ private:
                 Muls(xFp32Block[r * numCol], xFp32Block[r * numCol], rstdVal, numCol);
             }
             PipeBarrier<PIPE_V>();
+
+            // Compact rstd from stride-8 to stride-1 before GM copy
+            for (uint32_t r = 0; r < curRows; r++) {
+                event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+                SetFlag<HardEvent::V_S>(eventVS);
+                WaitFlag<HardEvent::V_S>(eventVS);
+                float rstdVal = rstdBlock.GetValue(r * NUM_PER_BLK_FP32);
+                event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+                SetFlag<HardEvent::S_V>(eventSV);
+                WaitFlag<HardEvent::S_V>(eventSV);
+                tmpBlock.SetValue(r, rstdVal);
+            }
+            PipeBarrier<PIPE_V>();
+            DataCopyParams rstdCopyParams;
+            rstdCopyParams.blockLen = sizeof(float);
+            rstdCopyParams.blockCount = curRows;
+            DataCopyPad(rstdGm[i_o * multiRowNum], tmpBlock, rstdCopyParams);
 
             WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
             Cast(x1Block, xFp32Block, RoundMode::CAST_RINT, curElems);
@@ -519,17 +558,30 @@ private:
             }
             PipeBarrier<PIPE_V>();
 
+            LocalTensor<int16_t> tmpInt16Block = tmpBlock.template ReinterpretCast<int16_t>();
+            LocalTensor<half> tmpHalfBlock = tmpBlock.template ReinterpretCast<half>();
+            QuantizeFp32ToInt8(outInt8Block, xFp32Block, tmpInt16Block, tmpHalfBlock, curElems);
+
+            // Compact scale values from stride-8 (rstdBlock) to stride-1 (tmpBlock) before GM copy
+            for (uint32_t r = 0; r < curRows; r++) {
+                event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+                SetFlag<HardEvent::V_S>(eventVS);
+                WaitFlag<HardEvent::V_S>(eventVS);
+                float sv = rstdBlock.GetValue(r * NUM_PER_BLK_FP32);
+                event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+                SetFlag<HardEvent::S_V>(eventSV);
+                WaitFlag<HardEvent::S_V>(eventSV);
+                tmpBlock.SetValue(r, sv);
+            }
+            PipeBarrier<PIPE_V>();
+
             event_t eventVMTE3S = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
             SetFlag<HardEvent::V_MTE3>(eventVMTE3S);
             WaitFlag<HardEvent::V_MTE3>(eventVMTE3S);
             DataCopyParams scaleCopyParams;
             scaleCopyParams.blockLen = sizeof(float);
             scaleCopyParams.blockCount = curRows;
-            DataCopyPad(scaleGm[i_o * multiRowNum], rstdBlock, scaleCopyParams);
-
-            LocalTensor<int16_t> tmpInt16Block = tmpBlock.template ReinterpretCast<int16_t>();
-            LocalTensor<half> tmpHalfBlock = tmpBlock.template ReinterpretCast<half>();
-            QuantizeFp32ToInt8(outInt8Block, xFp32Block, tmpInt16Block, tmpHalfBlock, curElems);
+            DataCopyPad(scaleGm[i_o * multiRowNum], tmpBlock, scaleCopyParams);
 
             event_t eventVMTE3Q = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
             SetFlag<HardEvent::V_MTE3>(eventVMTE3Q);
