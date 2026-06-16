@@ -438,8 +438,8 @@ private:
             DataCopyCustom<T>(x2Block, gammaGm, numCol);
             SetFlag<HardEvent::MTE2_V>(eventMTE2V2);
 
-            Cast(xFp32Block, x1Block, RoundMode::CAST_NONE, curElems);
-            PipeBarrier<PIPE_V>();
+            // xFp32Block still holds full FP32 sum from Add stage — no re-cast needed
+            // (avoids BF16→FP32 precision loss that standalone NORMAL mode also avoids)
 
             Mul(sqxBlock, xFp32Block, xFp32Block, curElems);
             PipeBarrier<PIPE_V>();

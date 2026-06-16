@@ -216,13 +216,12 @@ __aicore__ inline void QuantizeFp32ToInt8(
     const LocalTensor<half>& tmpHalf,
     uint32_t count)
 {
-    Cast(tmpInt32, xFp32, RoundMode::CAST_RINT, count);
+    LocalTensor<int16_t> tmpInt16 = tmpInt32.template ReinterpretCast<int16_t>();
+    Cast(tmpInt16, xFp32, RoundMode::CAST_RINT, count);
     PipeBarrier<PIPE_V>();
 
-    SetDeqScale(static_cast<half>(1.0));
-    PipeBarrier<PIPE_V>();
-
-    Cast(tmpHalf, tmpInt32, RoundMode::CAST_ROUND, count);
+    // No SetDeqScale call — aligns with standalone dynamic_quant DbOpt / MultiRow path
+    Cast(tmpHalf, tmpInt16, RoundMode::CAST_ROUND, count);
     PipeBarrier<PIPE_V>();
 
     Cast(outInt8, tmpHalf, RoundMode::CAST_TRUNC, count);

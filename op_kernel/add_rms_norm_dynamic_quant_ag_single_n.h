@@ -293,7 +293,7 @@ private:
             Muls(xFp32Local, xFp32Local, invScale, numCol);
             PipeBarrier<PIPE_V>();
 
-            // Quantize: FP32 → INT16 (round) → FP16 (round) → INT8 (trunc)
+            // Quantize: FP32 → INT16 (round) → half (round) → INT8 (trunc)
             LocalTensor<int32_t> tmpInt32Local = tmpLocal.template ReinterpretCast<int32_t>();
             LocalTensor<half> tmpHalfLocal = tmpLocal.template ReinterpretCast<half>();
             QuantizeFp32ToInt8(outInt8Local, xFp32Local, tmpInt32Local, tmpHalfLocal, numCol);
@@ -366,9 +366,8 @@ private:
             DataCopyCustom<T>(x2Local, gammaGm, numCol);
             SetFlag<HardEvent::MTE2_V>(eventMTE2V2);
 
-            // Cast BF16 → FP32 for RMS computation
-            Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
-            PipeBarrier<PIPE_V>();
+            // xFp32Local still holds full FP32 sum from Add stage — no re-cast needed
+            // (avoids BF16→FP32 precision loss that standalone NORMAL mode also avoids)
 
             // sqx = x^2
             Mul(sqxLocal, xFp32Local, xFp32Local, numCol);
@@ -485,7 +484,7 @@ private:
             Muls(xFp32Local, xFp32Local, invScale, numCol);
             PipeBarrier<PIPE_V>();
 
-            // Quantize
+            // Quantize: FP32 → INT16 (round) → half (round) → INT8 (trunc)
             LocalTensor<int32_t> tmpInt32Local = tmpLocal.template ReinterpretCast<int32_t>();
             LocalTensor<half> tmpHalfLocal = tmpLocal.template ReinterpretCast<half>();
             QuantizeFp32ToInt8(outInt8Local, xFp32Local, tmpInt32Local, tmpHalfLocal, numCol);
