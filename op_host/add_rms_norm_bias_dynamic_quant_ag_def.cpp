@@ -9,16 +9,20 @@
  */
 
 /*!
- * \file add_rms_norm_dynamic_quant_ag_def.cpp
- * \brief Operator definition for AddRmsNormDynamicQuantAG
+ * \file add_rms_norm_bias_dynamic_quant_ag_def.cpp
+ * \brief Operator definition for AddRmsNormBiasDynamicQuantAG
+ *
+ * Fused operator: Add(x1+x2) + RMS Norm + Dynamic Quant + AllGather
+ * Targets: ascend910b, ascend910_93
+ * Dtypes: FP16, BF16
  */
 
 #include "register/op_def_registry.h"
 
 namespace ops {
-class AddRmsNormDynamicQuantAG : public OpDef {
+class AddRmsNormBiasDynamicQuantAG : public OpDef {
 public:
-    explicit AddRmsNormDynamicQuantAG(const char* name) : OpDef(name)
+    explicit AddRmsNormBiasDynamicQuantAG(const char* name) : OpDef(name)
     {
         // Input: x1 - first Add input
         this->Input("x1")
@@ -44,29 +48,37 @@ public:
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
 
-        // Output: y_quant - quantized result (INT8), first dim × groupSize via AllGather
+        // Output: y_quant - quantized result (INT8), first dim x groupSize via AllGather
         this->Output("y_quant")
             .ParamType(REQUIRED)
             .DataType({ge::DT_INT8, ge::DT_INT8})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
 
-        // Output: scale - quantization scale (FP32), first dim × groupSize via AllGather
+        // Output: scale - quantization scale (FP32), first dim x groupSize via AllGather
         this->Output("scale")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
 
-        // Output: y_add - Add result (same type as x1, shape unchanged)
-        this->Output("y_add")
+        // Output: x - Add result (same type as x1, shape unchanged)
+        this->Output("x")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
 
-        // Output: rstd - RmsNorm reciprocal standard deviation (FP32, shape unchanged)
+        // Output: y - RmsNorm result (same type as x1, shape unchanged)
+        this->Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+
+        // Output: rstd - RmsNorm reciprocal standard deviation (FP32)
         this->Output("rstd")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT})
@@ -78,7 +90,7 @@ public:
         this->Attr("epsilon").AttrType(OPTIONAL).Float(1e-6f);
         this->Attr("dst_type").AttrType(OPTIONAL).Int(ge::DT_INT8);
 
-        // === AG 相关属性 ===
+        // AG-related attributes
         this->Attr("group").AttrType(REQUIRED).String();
         this->Attr("groupSize").AttrType(OPTIONAL).Int(0);
 
@@ -94,15 +106,12 @@ public:
             .ExtendCfgInfo("jitCompile.flag", "static_false")
             .ExtendCfgInfo("multiKernelSupportDynamicGraph.value", "multi_kernel");
 
-        // === MC2 通信配置 ===
+        // MC2 communication config
         this->MC2().HcclGroup("group");
-         // Platform: Ascend 910B
         this->AICore().AddConfig("ascend910b", aicore_config);
-
-        // Platform: Ascend 910_93
         this->AICore().AddConfig("ascend910_93", aicore_config);
     }
 };
 
-OP_ADD(AddRmsNormDynamicQuantAG);
+OP_ADD(AddRmsNormBiasDynamicQuantAG);
 } // namespace ops

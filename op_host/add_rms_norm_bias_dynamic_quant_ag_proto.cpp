@@ -9,8 +9,10 @@
  */
 
 /*!
- * \file add_rms_norm_dynamic_quant_ag_infershape.cpp
- * \brief Shape and data type inference for AddRmsNormDynamicQuantAG
+ * \file add_rms_norm_bias_dynamic_quant_ag_proto.cpp
+ * \brief Shape and data type inference for AddRmsNormBiasDynamicQuantAG
+ *
+ * 5 outputs: y_quant(0), scale(1), x(2), y(3), rstd(4)
  */
 
 #include "log/log.h"
@@ -19,12 +21,11 @@
 #include "util/shape_util.h"
 #include "error/ops_error.h"
 
-// #include "op_graph/runtime_util.h"
-
 static constexpr int IDX_0 = 0;
 static constexpr int IDX_1 = 1;
 static constexpr int IDX_2 = 2;
 static constexpr int IDX_3 = 3;
+static constexpr int IDX_4 = 4;
 
 // AG attribute indices
 static constexpr int ATTR_GROUP_SIZE = 3; // attr index 3 = groupSize
@@ -34,9 +35,9 @@ using namespace Ops::Base;
 
 namespace ops {
 
-static ge::graphStatus InferShape4AddRmsNormDynamicQuantAG(gert::InferShapeContext* context)
+static ge::graphStatus InferShape4AddRmsNormBiasDynamicQuantAG(gert::InferShapeContext* context)
 {
-    OPS_LOG_D(context, "Begin to do InferShape4AddRmsNormDynamicQuantAG");
+    OPS_LOG_D(context, "Begin to do InferShape4AddRmsNormBiasDynamicQuantAG");
 
     // get input shapes
     const gert::Shape* x1Shape = context->GetInputShape(IDX_0);
@@ -48,15 +49,20 @@ static ge::graphStatus InferShape4AddRmsNormDynamicQuantAG(gert::InferShapeConte
     // get output shapes
     gert::Shape* yQuantShape = context->GetOutputShape(IDX_0);
     gert::Shape* scaleShape  = context->GetOutputShape(IDX_1);
-    gert::Shape* yAddShape   = context->GetOutputShape(IDX_2);
-    gert::Shape* rstdShape   = context->GetOutputShape(IDX_3);
+    gert::Shape* xShape      = context->GetOutputShape(IDX_2);
+    gert::Shape* yShape      = context->GetOutputShape(IDX_3);
+    gert::Shape* rstdShape   = context->GetOutputShape(IDX_4);
     OP_CHECK_NULL_WITH_CONTEXT(context, yQuantShape);
     OP_CHECK_NULL_WITH_CONTEXT(context, scaleShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, yAddShape);
+    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OP_CHECK_NULL_WITH_CONTEXT(context, yShape);
     OP_CHECK_NULL_WITH_CONTEXT(context, rstdShape);
 
-    // yAdd: same shape as x1 (unchanged by AG)
-    *yAddShape = *x1Shape;
+    // x (add result): same shape as x1
+    *xShape = *x1Shape;
+
+    // y (rmsnorm result): same shape as x1
+    *yShape = *x1Shape;
 
     size_t xDimNum = x1Shape->GetDimNum();
     size_t gammaDimNum = gammaShape->GetDimNum();
@@ -65,7 +71,7 @@ static ge::graphStatus InferShape4AddRmsNormDynamicQuantAG(gert::InferShapeConte
         SetUnknownRank(*yQuantShape);
         SetUnknownRank(*scaleShape);
         SetUnknownRank(*rstdShape);
-        OPS_LOG_D(context, "End to do InferShape4AddRmsNormDynamicQuantAG with unknown rank.");
+        OPS_LOG_D(context, "End to do InferShape4AddRmsNormBiasDynamicQuantAG with unknown rank.");
         return GRAPH_SUCCESS;
     }
 
@@ -84,18 +90,18 @@ static ge::graphStatus InferShape4AddRmsNormDynamicQuantAG(gert::InferShapeConte
         }
     }
 
-    // yQuant: same shape as x1, but first dim × groupSize (AllGather)
+    // yQuant: same shape as x1, but first dim x groupSize (AllGather)
     *yQuantShape = *x1Shape;
     yQuantShape->SetDim(0, x1Shape->GetDim(0) * groupSize);
 
-    // scale shape: x1 shape without last dimension, first dim × groupSize
+    // scale shape: x1 shape without last dimension, first dim x groupSize
     scaleShape->SetDimNum(xDimNum - 1);
     scaleShape->SetDim(0, x1Shape->GetDim(0) * groupSize);
     for (size_t i = 1; i < xDimNum - 1; i++) {
         scaleShape->SetDim(i, x1Shape->GetDim(i));
     }
 
-    // rstd shape: same dims as x1, last gamma dims set to 1 (unchanged by AG)
+    // rstd shape: same dims as x1, last gamma dims set to 1
     rstdShape->SetDimNum(xDimNum);
     for (size_t i = 0; i < xDimNum; i++) {
         if (i < xDimNum - gammaDimNum) {
@@ -105,15 +111,15 @@ static ge::graphStatus InferShape4AddRmsNormDynamicQuantAG(gert::InferShapeConte
         }
     }
 
-    OPS_LOG_D(context->GetNodeName(), "End to do InferShape4AddRmsNormDynamicQuantAG");
+    OPS_LOG_D(context->GetNodeName(), "End to do InferShape4AddRmsNormBiasDynamicQuantAG");
     return GRAPH_SUCCESS;
 }
 
-static graphStatus InferDataType4AddRmsNormDynamicQuantAG(gert::InferDataTypeContext* context)
+static graphStatus InferDataType4AddRmsNormBiasDynamicQuantAG(gert::InferDataTypeContext* context)
 {
-    OPS_LOG_D(context->GetNodeName(), "Begin to do InferDataType4AddRmsNormDynamicQuantAG");
+    OPS_LOG_D(context->GetNodeName(), "Begin to do InferDataType4AddRmsNormBiasDynamicQuantAG");
 
-    // yQuant: INT8 (from dst_type attribute)
+    // yQuant (0): INT8 (from dst_type attribute)
     ge::DataType yDtype = ge::DT_INT8;
     auto* attrs = context->GetAttrs();
     if (attrs != nullptr) {
@@ -124,21 +130,24 @@ static graphStatus InferDataType4AddRmsNormDynamicQuantAG(gert::InferDataTypeCon
     }
     context->SetOutputDataType(IDX_0, yDtype);
 
-    // scale: FP32
+    // scale (1): FP32
     context->SetOutputDataType(IDX_1, DT_FLOAT);
 
-    // yAdd: same type as x1
+    // x (2): same type as x1
     context->SetOutputDataType(IDX_2, context->GetInputDataType(IDX_0));
 
-    // rstd: FP32
-    context->SetOutputDataType(IDX_3, DT_FLOAT);
+    // y (3): same type as x1
+    context->SetOutputDataType(IDX_3, context->GetInputDataType(IDX_0));
 
-    OPS_LOG_D(context->GetNodeName(), "End to do InferDataType4AddRmsNormDynamicQuantAG");
+    // rstd (4): FP32
+    context->SetOutputDataType(IDX_4, DT_FLOAT);
+
+    OPS_LOG_D(context->GetNodeName(), "End to do InferDataType4AddRmsNormBiasDynamicQuantAG");
     return GRAPH_SUCCESS;
 }
 
-IMPL_OP_INFERSHAPE(AddRmsNormDynamicQuantAG)
-    .InferShape(InferShape4AddRmsNormDynamicQuantAG)
-    .InferDataType(InferDataType4AddRmsNormDynamicQuantAG);
+IMPL_OP_INFERSHAPE(AddRmsNormBiasDynamicQuantAG)
+    .InferShape(InferShape4AddRmsNormBiasDynamicQuantAG)
+    .InferDataType(InferDataType4AddRmsNormBiasDynamicQuantAG);
 
 } // namespace ops

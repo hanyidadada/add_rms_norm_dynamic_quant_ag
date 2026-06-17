@@ -9,16 +9,16 @@
  */
 
 /*!
- * \file add_rms_norm_dynamic_quant_ag_base.h
- * \brief Base utilities and AG communication for AddRmsNormDynamicQuantAG fusion kernel
+ * \file add_rms_norm_bias_dynamic_quant_ag_base.h
+ * \brief Base utilities and AG communication for AddRmsNormBiasDynamicQuantAG fusion kernel
  */
 
-#ifndef ADD_RMS_NORM_DYNAMIC_QUANT_AG_BASE_H_
-#define ADD_RMS_NORM_DYNAMIC_QUANT_AG_BASE_H_
+#ifndef ADD_RMS_NORM_BIAS_DYNAMIC_QUANT_AG_BASE_H_
+#define ADD_RMS_NORM_BIAS_DYNAMIC_QUANT_AG_BASE_H_
 
 #include "kernel_operator.h"
 #include "reduce_common.h"
-#include "add_rms_norm_dynamic_quant_ag_tiling.h"
+#include "add_rms_norm_bias_dynamic_quant_ag_tiling.h"
 
 using namespace AscendC;
 
@@ -115,13 +115,12 @@ __aicore__ inline void DataCopyCustom(const U& dstTensor, const R& srcTensor, co
 #endif
 }
 
-// ========== Reduce Operations (verbatim from SDK rms_norm_base.h) ==========
+// ========== Reduce Operations ==========
 
 __aicore__ inline void ReduceSumFP32(
     const LocalTensor<float>& dst_local, const LocalTensor<float>& src_local,
     const LocalTensor<float>& work_local, int32_t count)
 {
-    // count need smaller than 255 repeat
     uint64_t mask = NUM_PER_REP_FP32;
     int32_t repeatTimes = count / NUM_PER_REP_FP32;
     int32_t tailCount = count % NUM_PER_REP_FP32;
@@ -185,7 +184,6 @@ __aicore__ inline void ReduceMaxInplace(const LocalTensor<float>& src_local, uin
     uint64_t remsFp32 = count & 0x3f;     // count % 64
 
     if (likely(repsFp32 > 1)) {
-        // 8 is rep stride
         if (repsFp32 - 1 > MAX_REPEAT) {
             Max(src_local, src_local[NUM_PER_REP_FP32], src_local, NUM_PER_REP_FP32, MAX_REPEAT,
                 {1, 1, 1, 0, 8, 0});
@@ -203,7 +201,6 @@ __aicore__ inline void ReduceMaxInplace(const LocalTensor<float>& src_local, uin
         PipeBarrier<PIPE_V>();
     }
     uint32_t mask = repsFp32 > 0 ? NUM_PER_REP_FP32 : count;
-    // 8 is rep stride
     WholeReduceMax(src_local, src_local, mask, 1, 8, 1, 8);
 }
 
@@ -309,7 +306,7 @@ __aicore__ inline void CopyGMToGM_SplitBytes(
 
 // ========== AG Base Class ==========
 
-class KernelAddRmsNormDynamicQuantAGBase {
+class KernelAddRmsNormBiasDynamicQuantAGBase {
 protected:
     Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
     GM_ADDR buff[16];
@@ -324,9 +321,9 @@ protected:
     int32_t blockIdx_;
 
 public:
-    __aicore__ inline KernelAddRmsNormDynamicQuantAGBase() {}
+    __aicore__ inline KernelAddRmsNormBiasDynamicQuantAGBase() {}
 
-    __aicore__ inline void InitAGParams(const AddRmsNormDynamicQuantAGTilingData* tiling)
+    __aicore__ inline void InitAGParams(const AddRmsNormBiasDynamicQuantAGTilingData* tiling)
     {
         this->groupSize = tiling->groupSize;
         this->rowLen = tiling->rowLen;
@@ -334,7 +331,7 @@ public:
 
         auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
         this->hccl_.InitV2(contextGM0, tiling);
-        this->hccl_.SetCcTilingV2(offsetof(AddRmsNormDynamicQuantAGTilingData, mc2CcTiling));
+        this->hccl_.SetCcTilingV2(offsetof(AddRmsNormBiasDynamicQuantAGTilingData, mc2CcTiling));
         for (int i = 0; i < tiling->groupSize; i++) {
             this->buff[i] = (GM_ADDR)this->hccl_.GetWindowsInAddr(i);
         }
@@ -399,7 +396,6 @@ public:
             this->CrossRankSyncV1(0, 1);
             AscendC::SyncAll<true>();
 
-            // Only copy data if this core actually computed rows
             uint64_t tensorLen = this->rowLen * this->rowTotalNum * sizeof(int8_t);
             uint64_t scaleLen = this->rowTotalNum * sizeof(float);
             AscendC::GlobalTensor<int8_t> srcTensor;
@@ -425,4 +421,4 @@ public:
     }
 };
 
-#endif // ADD_RMS_NORM_DYNAMIC_QUANT_AG_BASE_H_
+#endif // ADD_RMS_NORM_BIAS_DYNAMIC_QUANT_AG_BASE_H_

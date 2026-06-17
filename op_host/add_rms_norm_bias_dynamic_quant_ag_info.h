@@ -9,22 +9,22 @@
  */
 
 /*!
- * \file add_rms_norm_dynamic_quant_ag_tiling.h
- * \brief Tiling data structure for AddRmsNormDynamicQuantAG fusion operator
+ * \file add_rms_norm_bias_dynamic_quant_ag_info.h
+ * \brief Host-side compile info struct for AddRmsNormBiasDynamicQuantAG
  */
 
-#ifndef OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_DYNAMIC_QUANT_AG_H_
-#define OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_DYNAMIC_QUANT_AG_H_
+#ifndef OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_BIAS_DYNAMIC_QUANT_AG_H_
+#define OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_BIAS_DYNAMIC_QUANT_AG_H_
 
 #include <cstdint>
 #include "tiling/tiling_api.h"
 #include "platform/platform_infos_def.h"
 #include "error/ops_error.h"
 
-struct AddRmsNormDynamicQuantAGCompileInfo {
+struct AddRmsNormBiasDynamicQuantAGCompileInfo {
     platform_ascendc::SocVersion curSocVersion = platform_ascendc::SocVersion::ASCEND910B;
     uint64_t totalCoreNum = 0;
     uint64_t maxUbSize = 0;
 };
 
-#endif // OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_DYNAMIC_QUANT_AG_H_
+#endif // OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_BIAS_DYNAMIC_QUANT_AG_H_

@@ -9,8 +9,8 @@
  */
 
 /*!
- * \file add_rms_norm_dynamic_quant_ag.cpp
- * \brief Main kernel entry for AddRmsNormDynamicQuantAG fusion operator.
+ * \file add_rms_norm_bias_dynamic_quant_ag.cpp
+ * \brief Main kernel entry for AddRmsNormBiasDynamicQuantAG fusion operator.
  *
  * Tiling Key Encoding: (dtype_key * 10 + mode_key)
  *   dtype_key: 1 = half, 3 = bfloat16
@@ -24,8 +24,8 @@
  * | 31  | MultiN   | bfloat16  |
  */
 
-#include "add_rms_norm_dynamic_quant_ag_single_n.h"
-#include "add_rms_norm_dynamic_quant_ag_multi_n.h"
+#include "add_rms_norm_bias_dynamic_quant_ag_single_n.h"
+#include "add_rms_norm_bias_dynamic_quant_ag_multi_n.h"
 
 using namespace AscendC;
 
@@ -34,28 +34,28 @@ using namespace AscendC;
     do {                                               \
         templateClass<T> op(&pipe);                    \
         op.Init(x1, x2, gamma,                         \
-                yQuant, scale, yAdd, rstd,             \
+                yQuant, scale, x, y, rstd,            \
                 workspace, &tilingData);               \
         op.Process();                                  \
     } while (0)
 
-extern "C" __global__ __aicore__ void add_rms_norm_dynamic_quant_ag(
+extern "C" __global__ __aicore__ void add_rms_norm_bias_dynamic_quant_ag(
     GM_ADDR x1, GM_ADDR x2, GM_ADDR gamma,
-    GM_ADDR yQuant, GM_ADDR scale, GM_ADDR yAdd, GM_ADDR rstd,
+    GM_ADDR yQuant, GM_ADDR scale, GM_ADDR x, GM_ADDR y, GM_ADDR rstd,
     GM_ADDR workspace, GM_ADDR tiling)
 {
     TPipe pipe;
-    REGISTER_TILING_DEFAULT(AddRmsNormDynamicQuantAGTilingData);
-    GET_TILING_DATA_WITH_STRUCT(AddRmsNormDynamicQuantAGTilingData, tilingData, tiling);
+    REGISTER_TILING_DEFAULT(AddRmsNormBiasDynamicQuantAGTilingData);
+    GET_TILING_DATA_WITH_STRUCT(AddRmsNormBiasDynamicQuantAGTilingData, tilingData, tiling);
 
     // Dispatch by tiling key
     if (TILING_KEY_IS(10)) {
-        FUSION_AG_OP_IMPL(KernelAddRmsNormDynamicQuantAGSingleN, half);
+        FUSION_AG_OP_IMPL(KernelAddRmsNormBiasDynamicQuantAGSingleN, half);
     } else if (TILING_KEY_IS(30)) {
-        FUSION_AG_OP_IMPL(KernelAddRmsNormDynamicQuantAGSingleN, bfloat16_t);
+        FUSION_AG_OP_IMPL(KernelAddRmsNormBiasDynamicQuantAGSingleN, bfloat16_t);
     } else if (TILING_KEY_IS(11)) {
-        FUSION_AG_OP_IMPL(KernelAddRmsNormDynamicQuantAGMultiN, half);
+        FUSION_AG_OP_IMPL(KernelAddRmsNormBiasDynamicQuantAGMultiN, half);
     } else if (TILING_KEY_IS(31)) {
-        FUSION_AG_OP_IMPL(KernelAddRmsNormDynamicQuantAGMultiN, bfloat16_t);
+        FUSION_AG_OP_IMPL(KernelAddRmsNormBiasDynamicQuantAGMultiN, bfloat16_t);
     }
 }

@@ -9,11 +9,16 @@
  */
 
 /*!
- * \file add_rms_norm_dynamic_quant_ag_tiling.cpp
- * \brief Tiling strategy for AddRmsNormDynamicQuantAG fusion operator
+ * \file add_rms_norm_bias_dynamic_quant_ag_tiling.cpp
+ * \brief Tiling strategy for AddRmsNormBiasDynamicQuantAG fusion operator
+ *
+ * Tiling key encoding: (dtype_key * 10 + mode_key)
+ *   dtype_key: 1 = half, 3 = bf16
+ *   mode_key:  0 = SingleN, 1 = MultiN
+ * Valid keys: 10, 30, 11, 31
  */
-#include "add_rms_norm_dynamic_quant_ag_info.h"
-#include "add_rms_norm_dynamic_quant_ag_tiling.h"
+#include "add_rms_norm_bias_dynamic_quant_ag_info.h"
+#include "add_rms_norm_bias_dynamic_quant_ag_tiling.h"
 
 #include "log/log.h"
 #include "register/op_impl_registry.h"
@@ -25,35 +30,32 @@ using namespace ge;
 
 namespace optiling {
 
-// Tiling key encoding: (dtype_key * 10 + mode_key)
-// dtype_key: 1=half, 3=bf16
-// mode_key:  0=SingleN, 1=MultiN
+// Tiling key encoding
 constexpr uint32_t DTYPE_KEY_HALF  = 1;
 constexpr uint32_t DTYPE_KEY_BF16  = 3;
 constexpr uint32_t MODE_SINGLE_N   = 0;
 constexpr uint32_t MODE_MULTI_N    = 1;
 
 constexpr uint32_t BLOCK_ALIGN_NUM = 16;
-constexpr uint32_t FLOAT_BLOCK_ALIGN_NUM = 8;
-constexpr uint32_t UB_RESERVED = 1024;    // reserved UB space
-constexpr uint32_t SYS_WORKSPACE = 16 * 1024 * 1024; // 16MB system workspace
+constexpr uint32_t UB_RESERVED = 1024;                  // reserved UB space
+constexpr uint32_t SYS_WORKSPACE = 16 * 1024 * 1024;    // 16MB system workspace
 constexpr uint32_t USR_WORKSPACE = 256;
 
 // UB size per row estimate coefficients
-// SingleN layout (per row, byte offset, ubLocal<float> base):
-//   x1Local(0) + x2Local(ubFactor) + xFp32Local(ubFactor) + sqxLocal(ubFactor*2)
-//   + tmpLocal(ubFactor*3) + outInt8Local(ubFactor*4)
-//   = ubFactor * (2+2+4+4+4+1) = ubFactor * 17 bytes
+// SingleN layout: x1Local(2B) + x2Local(2B) + xFp32Local(4B) + sqxLocal(4B) + tmpLocal(4B) + outInt8Local(1B)
+// = ubFactor * (2+2+4+4+4+1) = ubFactor * 17 bytes
 constexpr uint32_t UB_PER_ROW_FP16_COEFF = 17;
 constexpr uint32_t UB_PER_ROW_BF16_COEFF = 17;
 
-static constexpr int IDX_X1    = 0;
-static constexpr int IDX_X2    = 1;
-static constexpr int IDX_GAMMA = 2;
-static constexpr int IDX_YQUANT = 0;
-static constexpr int IDX_SCALE  = 1;
-static constexpr int IDX_YADD   = 2;
-static constexpr int IDX_RSTD   = 3;
+// I/O indices
+static constexpr int IDX_X1      = 0;
+static constexpr int IDX_X2      = 1;
+static constexpr int IDX_GAMMA   = 2;
+static constexpr int IDX_YQUANT  = 0;
+static constexpr int IDX_SCALE   = 1;
+static constexpr int IDX_X       = 2;   // add result
+static constexpr int IDX_Y       = 3;   // rmsnorm result
+static constexpr int IDX_RSTD    = 4;
 
 // AG attribute indices
 static constexpr int GROUP_IDX = 2;
@@ -76,12 +78,13 @@ static uint32_t CeilDiv(uint32_t x, uint32_t y)
 
 static bool CheckNullptr(gert::TilingContext* context)
 {
-    const gert::StorageShape* x1Shape    = context->GetInputShape(IDX_X1);
-    const gert::StorageShape* x2Shape    = context->GetInputShape(IDX_X2);
-    const gert::StorageShape* gammaShape = context->GetInputShape(IDX_GAMMA);
+    const gert::StorageShape* x1Shape     = context->GetInputShape(IDX_X1);
+    const gert::StorageShape* x2Shape     = context->GetInputShape(IDX_X2);
+    const gert::StorageShape* gammaShape  = context->GetInputShape(IDX_GAMMA);
     const gert::StorageShape* yQuantShape = context->GetOutputShape(IDX_YQUANT);
     const gert::StorageShape* scaleShape  = context->GetOutputShape(IDX_SCALE);
-    const gert::StorageShape* yAddShape   = context->GetOutputShape(IDX_YADD);
+    const gert::StorageShape* xShape      = context->GetOutputShape(IDX_X);
+    const gert::StorageShape* yShape      = context->GetOutputShape(IDX_Y);
     const gert::StorageShape* rstdShape   = context->GetOutputShape(IDX_RSTD);
 
     OP_CHECK_NULL_WITH_CONTEXT(context, x1Shape);
@@ -89,7 +92,8 @@ static bool CheckNullptr(gert::TilingContext* context)
     OP_CHECK_NULL_WITH_CONTEXT(context, gammaShape);
     OP_CHECK_NULL_WITH_CONTEXT(context, yQuantShape);
     OP_CHECK_NULL_WITH_CONTEXT(context, scaleShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, yAddShape);
+    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OP_CHECK_NULL_WITH_CONTEXT(context, yShape);
     OP_CHECK_NULL_WITH_CONTEXT(context, rstdShape);
     return true;
 }
@@ -120,20 +124,22 @@ static bool CheckDataType(gert::TilingContext* context)
 
 static bool CheckInputOutputDim(gert::TilingContext* context)
 {
-    const gert::StorageShape* x1Shape    = context->GetInputShape(IDX_X1);
-    const gert::StorageShape* x2Shape    = context->GetInputShape(IDX_X2);
-    const gert::StorageShape* gammaShape = context->GetInputShape(IDX_GAMMA);
+    const gert::StorageShape* x1Shape     = context->GetInputShape(IDX_X1);
+    const gert::StorageShape* x2Shape     = context->GetInputShape(IDX_X2);
+    const gert::StorageShape* gammaShape  = context->GetInputShape(IDX_GAMMA);
     const gert::StorageShape* yQuantShape = context->GetOutputShape(IDX_YQUANT);
     const gert::StorageShape* scaleShape  = context->GetOutputShape(IDX_SCALE);
-    const gert::StorageShape* yAddShape   = context->GetOutputShape(IDX_YADD);
+    const gert::StorageShape* xShape      = context->GetOutputShape(IDX_X);
+    const gert::StorageShape* yShape      = context->GetOutputShape(IDX_Y);
     const gert::StorageShape* rstdShape   = context->GetOutputShape(IDX_RSTD);
 
-    size_t x1DimNum    = x1Shape->GetStorageShape().GetDimNum();
-    size_t x2DimNum    = x2Shape->GetStorageShape().GetDimNum();
-    size_t gammaDimNum = gammaShape->GetStorageShape().GetDimNum();
+    size_t x1DimNum     = x1Shape->GetStorageShape().GetDimNum();
+    size_t x2DimNum     = x2Shape->GetStorageShape().GetDimNum();
+    size_t gammaDimNum  = gammaShape->GetStorageShape().GetDimNum();
     size_t yQuantDimNum = yQuantShape->GetStorageShape().GetDimNum();
     size_t scaleDimNum  = scaleShape->GetStorageShape().GetDimNum();
-    size_t yAddDimNum   = yAddShape->GetStorageShape().GetDimNum();
+    size_t xDimNum      = xShape->GetStorageShape().GetDimNum();
+    size_t yDimNum      = yShape->GetStorageShape().GetDimNum();
     size_t rstdDimNum   = rstdShape->GetStorageShape().GetDimNum();
 
     // x1 dims should be 2-8
@@ -142,13 +148,13 @@ static bool CheckInputOutputDim(gert::TilingContext* context)
         OPS_LOG_E(context->GetNodeName(), "x1 dim num must be in range [2, 8]."),
         return false);
 
-    // x1, x2, yQuant, yAdd must have same dims
+    // x1, x2, yQuant, x, y must have same dims
     OP_CHECK_IF(
-        x1DimNum != x2DimNum || x1DimNum != yQuantDimNum || x1DimNum != yAddDimNum,
-        OPS_LOG_E(context->GetNodeName(), "x1, x2, yQuant, yAdd must have same dims."),
+        x1DimNum != x2DimNum || x1DimNum != yQuantDimNum || x1DimNum != xDimNum || x1DimNum != yDimNum,
+        OPS_LOG_E(context->GetNodeName(), "x1, x2, yQuant, x, y must have same dims."),
         return false);
 
-    // gamma dims: 1 or must be <= x1 dims
+    // gamma dims: must be <= x1 dims
     OP_CHECK_IF(
         gammaDimNum > x1DimNum,
         OPS_LOG_E(context->GetNodeName(), "gamma dim num should not be greater than x1 dim num."),
@@ -180,7 +186,7 @@ static bool CheckInputOutputDim(gert::TilingContext* context)
 
 static void GetCompileParameters(gert::TilingContext* context, uint32_t& numCore, uint64_t& ubSize, uint32_t& sysWorkspaceSize)
 {
-    auto ptrCompileInfo = reinterpret_cast<const AddRmsNormDynamicQuantAGCompileInfo*>(context->GetCompileInfo());
+    auto ptrCompileInfo = reinterpret_cast<const AddRmsNormBiasDynamicQuantAGCompileInfo*>(context->GetCompileInfo());
     if (ptrCompileInfo == nullptr) {
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
         numCore = ascendcPlatform.GetCoreNumAiv();
@@ -248,9 +254,7 @@ static void CalculateMultiCoreDistribution(
     uint32_t& headCoreNum, uint32_t& rowPerHeadCore, uint32_t& rowPerTailCore,
     uint32_t& useCoreNum)
 {
-    // Align with standalone add_rms_norm CalculateBlockParameters:
-    // When numRow < numCore, limit cores to numRow (each core gets at least 1 row,
-    // matching standalone's useCoreNum = CeilDiv(numRow, blockFactor) with blockFactor=1).
+    // When numRow < numCore, limit cores to numRow (each core gets at least 1 row)
     uint32_t effectiveNumCore = std::min(numRow, numCore);
     useCoreNum = effectiveNumCore;
     rowPerHeadCore = CeilDiv(numRow, effectiveNumCore);
@@ -294,16 +298,16 @@ static uint32_t DetermineModeAndRows(
 
 // ========== Tiling Prepare ==========
 
-static ge::graphStatus TilingPrepareAddRmsNormDynamicQuantAG(gert::TilingParseContext* context)
+static ge::graphStatus TilingPrepareAddRmsNormBiasDynamicQuantAG(gert::TilingParseContext* context)
 {
     OP_TILING_CHECK(nullptr == context, OPS_LOG_E(context->GetNodeName(), "Context is null"), return ge::GRAPH_FAILED);
-    OPS_LOG_D(context->GetNodeName(), "Enter TilingPrepareAddRmsNormDynamicQuantAG.");
+    OPS_LOG_D(context->GetNodeName(), "Enter TilingPrepareAddRmsNormBiasDynamicQuantAG.");
 
     fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
     OPS_ERR_IF(platformInfoPtr == nullptr, OPS_LOG_E(context->GetNodeName(), "PlatformInfoPtr is null"),
                return ge::GRAPH_FAILED);
 
-    auto compileInfoPtr = context->GetCompiledInfo<AddRmsNormDynamicQuantAGCompileInfo>();
+    auto compileInfoPtr = context->GetCompiledInfo<AddRmsNormBiasDynamicQuantAGCompileInfo>();
     OPS_ERR_IF(compileInfoPtr == nullptr, OPS_LOG_E(context->GetNodeName(), "CompileInfoPtr is null"),
                return ge::GRAPH_FAILED);
 
@@ -316,9 +320,9 @@ static ge::graphStatus TilingPrepareAddRmsNormDynamicQuantAG(gert::TilingParseCo
 
 // ========== Main Tiling Entry ==========
 
-static ge::graphStatus TilingAddRmsNormDynamicQuantAG(gert::TilingContext* context)
+static ge::graphStatus TilingAddRmsNormBiasDynamicQuantAG(gert::TilingContext* context)
 {
-    OPS_LOG_I(context->GetNodeName(), "Enter TilingAddRmsNormDynamicQuantAG");
+    OPS_LOG_I(context->GetNodeName(), "Enter TilingAddRmsNormBiasDynamicQuantAG");
 
     // 1. Parameter validation
     OP_CHECK_IF(!CheckNullptr(context), OPS_LOG_E(context->GetNodeName(), "Input shape invalid (nullptr)."), return ge::GRAPH_FAILED);
@@ -360,9 +364,7 @@ static ge::graphStatus TilingAddRmsNormDynamicQuantAG(gert::TilingContext* conte
     uint32_t tilingKey = (dtypeKey * 10) + modeKey;
     context->SetTilingKey(tilingKey);
 
-    // 9. useCoreNum already computed in CalculateMultiCoreDistribution
-
-    // 10. Extract AG attributes and compute MC2 parameters
+    // 9. Extract AG attributes and compute MC2 parameters
     auto attrs = context->GetAttrs();
     auto group = attrs->GetAttrPointer<char>(GROUP_IDX);
     auto groupSizePtr = attrs->GetAttrPointer<int>(GROUP_SIZE_IDX);
@@ -375,12 +377,12 @@ static ge::graphStatus TilingAddRmsNormDynamicQuantAG(gert::TilingContext* conte
         rowTotalNum *= x1Shape->GetStorageShape().GetDim(i);
     }
 
-    // 11. Build tiling data struct
-    AddRmsNormDynamicQuantAGTilingData *tilingData = context->GetTilingData<AddRmsNormDynamicQuantAGTilingData>();
+    // 10. Build tiling data struct
+    AddRmsNormBiasDynamicQuantAGTilingData *tilingData = context->GetTilingData<AddRmsNormBiasDynamicQuantAGTilingData>();
 
-    tilingData->groupSize    = *groupSizePtr;
-    tilingData->rowLen       = rowLen;
-    tilingData->rowTotalNum  = rowTotalNum;
+    tilingData->groupSize      = *groupSizePtr;
+    tilingData->rowLen         = rowLen;
+    tilingData->rowTotalNum    = rowTotalNum;
     tilingData->numRow         = numRow;
     tilingData->numCol         = numCol;
     tilingData->epsilon        = epsilon;
@@ -393,7 +395,7 @@ static ge::graphStatus TilingAddRmsNormDynamicQuantAG(gert::TilingContext* conte
     tilingData->multiRowNum    = multiRowNum;
     tilingData->ubFactor       = ubFactor;
 
-    // 12. MC2 AlltoAll communication configuration
+    // 11. MC2 AlltoAll communication configuration
     uint32_t opType = 8; // batch write
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     auto aivNum = ascendcPlatform.GetCoreNumAiv();
@@ -408,15 +410,15 @@ static ge::graphStatus TilingAddRmsNormDynamicQuantAG(gert::TilingContext* conte
     mc2CcTilingConfig.GetTiling(tilingData->mc2InitTiling);
     mc2CcTilingConfig.GetTiling(tilingData->mc2CcTiling);
 
-    // 14. Set block dim (must be >= groupSize for AG)
+    // 12. Set block dim (must be >= groupSize for AG)
     uint32_t usedcore = std::max(useCoreNum, (uint32_t)*groupSizePtr);
     context->SetBlockDim(usedcore);
 
-    // 15. Set workspace size
+    // 13. Set workspace size
     size_t* workSpaces = context->GetWorkspaceSizes(1);
     workSpaces[0] = USR_WORKSPACE + sysWorkspaceSize;
 
-    // 16. Log results
+    // 14. Log results
     OPS_LOG_I(context->GetNodeName(), "Tiling Key: %u", tilingKey);
     OPS_LOG_I(context->GetNodeName(), "Block Dim: %u (useCore: %u, groupSize: %u)", usedcore, useCoreNum, *groupSizePtr);
     OPS_LOG_I(context->GetNodeName(), "numRow: %u, numCol: %u, multiRowNum: %u, ubFactor: %u",
@@ -426,13 +428,13 @@ static ge::graphStatus TilingAddRmsNormDynamicQuantAG(gert::TilingContext* conte
     OPS_LOG_I(context->GetNodeName(), "epsilon: %f, avgFactor: %f", epsilon, tilingData->avgFactor);
     OPS_LOG_I(context->GetNodeName(), "headCoreNum: %u, rowPerHeadCore: %u, rowPerTailCore: %u",
             headCoreNum, rowPerHeadCore, rowPerTailCore);
-    OPS_LOG_I(context->GetNodeName(), "Exit TilingAddRmsNormDynamicQuantAG");
+    OPS_LOG_I(context->GetNodeName(), "Exit TilingAddRmsNormBiasDynamicQuantAG");
 
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_OPTILING(AddRmsNormDynamicQuantAG)
-    .Tiling(TilingAddRmsNormDynamicQuantAG)
-    .TilingParse<AddRmsNormDynamicQuantAGCompileInfo>(TilingPrepareAddRmsNormDynamicQuantAG);
+IMPL_OP_OPTILING(AddRmsNormBiasDynamicQuantAG)
+    .Tiling(TilingAddRmsNormBiasDynamicQuantAG)
+    .TilingParse<AddRmsNormBiasDynamicQuantAGCompileInfo>(TilingPrepareAddRmsNormBiasDynamicQuantAG);
 
 } // namespace optiling

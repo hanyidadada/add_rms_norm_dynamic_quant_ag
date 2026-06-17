@@ -9,22 +9,22 @@
  */
 
 /*!
- * \file add_rms_norm_dynamic_quant_ag_tiling.h
- * \brief Kernel-side tiling data structure for AddRmsNormDynamicQuantAG
+ * \file add_rms_norm_bias_dynamic_quant_ag_tiling.h
+ * \brief Kernel-side tiling data structure for AddRmsNormBiasDynamicQuantAG
  */
 
-#ifndef OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_DYN_QUANT_AG_TILING_H
-#define OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_DYN_QUANT_AG_TILING_H
+#ifndef OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_BIAS_DYN_QUANT_AG_TILING_H
+#define OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_BIAS_DYN_QUANT_AG_TILING_H
 
 typedef struct {
-    // ===== MC2 字段（最前面，确保 offsetof 正确）=====
+    // MC2 fields (must be first for correct offsetof)
     AscendC::tiling::Mc2InitTiling mc2InitTiling;
     AscendC::tiling::Mc2CcTiling mc2CcTiling;
     uint64_t groupSize;
     uint64_t rowLen;
     uint64_t rowTotalNum;
 
-    // ===== 原有字段（不变）=====
+    // Computation fields
     uint32_t numRow;         // N - number of rows
     uint32_t numCol;         // D - number of columns
     float    epsilon;        // numerical stability term
@@ -36,6 +36,6 @@ typedef struct {
     uint32_t rowPerTailCore; // rows per tail core
     uint32_t multiRowNum;    // rows processed per iteration in MultiN mode
     uint32_t ubFactor;       // UB allocation factor (aligned col size)
-} AddRmsNormDynamicQuantAGTilingData;
+} AddRmsNormBiasDynamicQuantAGTilingData;
 
-#endif // OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_DYN_QUANT_AG_TILING_H
+#endif // OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_BIAS_DYN_QUANT_AG_TILING_H
