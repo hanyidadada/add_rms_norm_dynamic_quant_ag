@@ -474,6 +474,10 @@ private:
         Cast(x1Block, xFp32Block, RoundMode::CAST_RINT, curElems);
         PipeBarrier<PIPE_V>();
 
+        // Reload BF16-rounded values for rmsnorm consistency (match standalone kernel precision)
+        Cast(xFp32Block, x1Block, RoundMode::CAST_NONE, curElems);
+        PipeBarrier<PIPE_V>();
+
         // Copy out x (add result)
         event_t eventVMTE3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
         SetFlag<HardEvent::V_MTE3>(eventVMTE3);
@@ -498,7 +502,7 @@ private:
         event_t eventMTE2V2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
         SetFlag<HardEvent::MTE2_V>(eventMTE2V2);
 
-        // xFp32Block still holds FP32 sum from Add — no re-cast needed
+        // xFp32Block holds BF16-rounded sum from StageAddBf16 — matches standalone kernel precision
 
         Mul(sqxBlock, xFp32Block, xFp32Block, curElems);
         PipeBarrier<PIPE_V>();

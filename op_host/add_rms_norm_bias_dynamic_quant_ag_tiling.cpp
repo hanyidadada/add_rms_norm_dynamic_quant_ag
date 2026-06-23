@@ -257,15 +257,9 @@ static void CalculateMultiCoreDistribution(
     // When numRow < numCore, limit cores to numRow (each core gets at least 1 row)
     uint32_t effectiveNumCore = std::min(numRow, numCore);
     useCoreNum = effectiveNumCore;
+    headCoreNum = numRow % effectiveNumCore;
     rowPerHeadCore = CeilDiv(numRow, effectiveNumCore);
-    uint32_t tailCoreNum = rowPerHeadCore * effectiveNumCore - numRow;
-    if (tailCoreNum == 0) {
-        headCoreNum = effectiveNumCore;
-        rowPerTailCore = rowPerHeadCore;
-    } else {
-        headCoreNum = effectiveNumCore - 1;
-        rowPerTailCore = numRow - rowPerHeadCore * (effectiveNumCore - 1);
-    }
+    rowPerTailCore = (headCoreNum == 0) ? rowPerHeadCore : (rowPerHeadCore - 1);
 }
 
 static uint32_t DetermineModeAndRows(
@@ -277,8 +271,12 @@ static uint32_t DetermineModeAndRows(
     // Align numCol to block size
     ubFactor = AlignUp<BLOCK_ALIGN_NUM>(numCol);
 
-    // Estimate UB required per row
+    // Estimate UB required per row (SingleN: ubFactor * 17 bytes)
+    // MultiN layout adds rstd block: NUM_PER_BLK_FP32 * sizeof(float) = 32 bytes per row
+    // and outInt8 is numCol bytes instead of ceil(numCol/4)*4 in float view,
+    // but the dominant difference is the 32-byte rstd block.
     uint64_t ubPerRow = static_cast<uint64_t>(ubFactor) * coeff;
+    ubPerRow += 32;  // rstd block overhead for MultiN mode
 
     // Calculate max rows that fit in UB
     uint32_t maxRows = static_cast<uint32_t>(ubSize / ubPerRow);
