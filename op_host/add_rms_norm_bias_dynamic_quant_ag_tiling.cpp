@@ -254,40 +254,59 @@ static void CalculateMultiCoreDistribution(
     uint32_t& headCoreNum, uint32_t& rowPerHeadCore, uint32_t& rowPerTailCore,
     uint32_t& useCoreNum)
 {
-    // When numRow < numCore, limit cores to numRow (each core gets at least 1 row)
+    // 1. 确定实际使用的核心数
     uint32_t effectiveNumCore = std::min(numRow, numCore);
     useCoreNum = effectiveNumCore;
-    headCoreNum = numRow % effectiveNumCore;
+    
+    // 2. 计算每个核心平均分配的行数（向上取整）
     rowPerHeadCore = CeilDiv(numRow, effectiveNumCore);
-    rowPerTailCore = (headCoreNum == 0) ? rowPerHeadCore : (rowPerHeadCore - 1);
-}
-
-static uint32_t DetermineModeAndRows(
-    uint32_t numCol, uint64_t ubSize, ge::DataType dataType,
-    uint32_t& multiRowNum, uint32_t& ubFactor)
-{
-    uint32_t coeff = (dataType == DT_BF16) ? UB_PER_ROW_BF16_COEFF : UB_PER_ROW_FP16_COEFF;
-
-    // Align numCol to block size
-    ubFactor = AlignUp<BLOCK_ALIGN_NUM>(numCol);
-
-    // Estimate UB required per row (ubFactor * 17 bytes)
-    uint64_t ubPerRow = static_cast<uint64_t>(ubFactor) * coeff;
-
-    // Calculate max rows that fit in UB (for multi-row mode assessment)
-    uint32_t maxRows = static_cast<uint32_t>(ubSize / ubPerRow);
-
-    if (maxRows < 2) {
-        // UB only fits 1 row → MODE_SINGLE_N
-        multiRowNum = 1;
-        return MODE_SINGLE_N;
+    
+    // 3. 计算有多少个核心需要多处理一行（即余数）
+    uint32_t remainder = numRow % effectiveNumCore;
+    
+    // 4. 根据余数决定分配策略
+    if (remainder == 0) {
+        // --- 情况1: 完美整除 ---
+        // 所有核心处理的行数都一样，没有“头部”和“尾部”之分
+        headCoreNum = 0;
+        rowPerTailCore = rowPerHeadCore;
     } else {
-        // Default: MODE_NORMAL — processes 1 row at a time, no stride-8 issues
-        multiRowNum = 1;
-        return MODE_NORMAL;
+        // --- 情况2: 无法整除 ---
+        // 前 remainder 个核心（头部核心）多处理一行
+        headCoreNum = remainder;
+        rowPerTailCore = rowPerHeadCore - 1;
     }
 }
 
+static uint32_t DetermineModeAndRows(
+    uint32_t numCol, uint64_t ubSize, ge::DataType dataType, 
+    uint32_t& multiRowNum, uint32_t& ub_factor) {
+    
+    uint32_t coeff = (dataType == DT_BF16) ? UB_PER_ROW_BF16_COEFF : UB_PER_ROW_FP16_COEFF;
+    
+    // 1. 对齐列数
+    ub_factor = AlignUp<BLOCK_ALIGN_NUM>(numCol);
+    
+    // 2. 计算每行需要的UB大小
+    uint64_t ubPerRow = static_cast<uint64_t>(ub_factor) * coeff;
+    
+    // 3. 计算UB能容纳的最大行数
+    uint32_t maxRows = static_cast<uint32_t>(ubSize / ubPerRow);
+
+    // --- 修改点开始 ---
+    if (maxRows < 1) {
+        // 【超大行场景】：UB连一行都放不下，必须走 SingleN 模式
+        // SingleN 模式通常有特殊的分片处理逻辑（如循环切片）
+        multiRowNum = 1;
+        return MODE_SINGLE_N;
+    } else {
+        // 【正常场景】：UB能放下至少一行，强制走 NORMAL 模式
+        // 这样即使是 100 行、500 行这种中等规模数据，也能利用多核并行
+        multiRowNum = 1; 
+        return MODE_NORMAL;
+    }
+    // --- 修改点结束 ---
+}
 // ========== Tiling Prepare ==========
 
 static ge::graphStatus TilingPrepareAddRmsNormBiasDynamicQuantAG(gert::TilingParseContext* context)

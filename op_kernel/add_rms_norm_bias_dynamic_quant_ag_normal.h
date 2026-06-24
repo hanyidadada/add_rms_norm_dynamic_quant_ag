@@ -274,37 +274,25 @@ private:
     }
 
     // ---- Stage 3: DynamicQuant (FP16) ----
-    // Matches standalone dynamic_quant Db kernel: cast to FP32 first (save signed data),
-    // then FP16 Abs+ReduceMax on the original buffer for maxAbs
+    // Matches SingleN kernel: FP32 Abs+ReduceMax, scale = 1.0 / invScale
     __aicore__ inline void StageDynamicQuantFp16(uint32_t row,
         LocalTensor<T>& x1Local,
         LocalTensor<float>& xFp32Local, LocalTensor<float>& sqxLocal, LocalTensor<float>& tmpLocal,
         LocalTensor<int8_t>& outInt8Local)
     {
-        // Cast FP16 → FP32 first (save signed data, matching Db's tempCast)
+        // Cast FP16 → FP32 (quant input, stays in UB — fusion key!)
         Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
         PipeBarrier<PIPE_V>();
 
-        // FP16 Abs+ReduceMax on original buffer — matches Db ComputeRowMax (FP16, no smooth)
-        Abs(x1Local, x1Local, numCol);
-        PipeBarrier<PIPE_V>();
-        ReduceMaxInplace(x1Local, numCol);
+        // abs(xFp32)
+        Abs(sqxLocal, xFp32Local, numCol);
         PipeBarrier<PIPE_V>();
 
-        // Cast the reduced FP16 max to FP32
-        Cast(sqxLocal, x1Local, RoundMode::CAST_NONE, 1);
+        // Reduce max in-place (FP32)
+        ReduceMaxInplace(sqxLocal, numCol);
         PipeBarrier<PIPE_V>();
 
-        // Read max_abs (FP16-precision, matching Db)
-        event_t eventVS2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(eventVS2);
-        WaitFlag<HardEvent::V_S>(eventVS2);
-        float maxAbs = sqxLocal.GetValue(0);
-        event_t eventSV2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
-        SetFlag<HardEvent::S_V>(eventSV2);
-        WaitFlag<HardEvent::S_V>(eventSV2);
-
-        // invScale = 127.0 / max_abs
+        // invScale = 127.0 / maxAbs
         LocalTensor<float> constScale = tmpLocal;
         Duplicate<float>(constScale, DYNAMIC_QUANT_INT8_SYM_SCALE, 1);
         PipeBarrier<PIPE_V>();
@@ -312,18 +300,18 @@ private:
         PipeBarrier<PIPE_V>();
 
         // Extract invScale scalar
-        event_t eventVS3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(eventVS3);
-        WaitFlag<HardEvent::V_S>(eventVS3);
+        event_t eventVS2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventVS2);
+        WaitFlag<HardEvent::V_S>(eventVS2);
         float invScale = sqxLocal.GetValue(0);
-        event_t eventSV3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
-        SetFlag<HardEvent::S_V>(eventSV3);
-        WaitFlag<HardEvent::S_V>(eventSV3);
+        event_t eventSV2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventSV2);
+        WaitFlag<HardEvent::S_V>(eventSV2);
 
-        // scale = max_abs * (1.0/127.0) — matches Db QuantizeRow constInvScale multiplication
-        float scaleVal = maxAbs * DYNAMIC_QUANT_INT8_RECIP_SCALE;
+        // scale = 1.0 / invScale = maxAbs / 127.0 — matches SingleN kernel
+        float scaleVal = 1.0f / invScale;
 
-        // Copy out scale to HCCL window
+        // Copy scale to HCCL window
         sqxLocal.SetValue(0, scaleVal);
         PipeBarrier<PIPE_V>();
         event_t eventVMTE3Scale = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
@@ -334,7 +322,7 @@ private:
         scaleCopyParams.blockCount = 1;
         DataCopyPad(scaleGm[row], sqxLocal, scaleCopyParams);
 
-        // xFp32Local still has signed FP32 data from the initial Cast — quantize it
+        // xFp32 *= invScale
         Muls(xFp32Local, xFp32Local, invScale, numCol);
         PipeBarrier<PIPE_V>();
 
@@ -343,7 +331,7 @@ private:
         LocalTensor<half> tmpHalfLocal = tmpLocal.template ReinterpretCast<half>();
         QuantizeFp32ToInt8(outInt8Local, xFp32Local, tmpInt32Local, tmpHalfLocal, numCol);
 
-        // Copy out yQuant to HCCL window
+        // Copy yQuant to HCCL window
         event_t eventVMTE3Quant = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
         SetFlag<HardEvent::V_MTE3>(eventVMTE3Quant);
         WaitFlag<HardEvent::V_MTE3>(eventVMTE3Quant);
@@ -541,8 +529,8 @@ private:
         SetFlag<HardEvent::S_V>(eventSV3);
         WaitFlag<HardEvent::S_V>(eventSV3);
 
-        // scale = max_abs * (1.0/127.0) — matches Db QuantizeRow constInvScale multiplication
-        float scaleVal = maxAbs * DYNAMIC_QUANT_INT8_RECIP_SCALE;
+        // scale = 1.0 / invScale = maxAbs / 127.0 — matches SingleN kernel
+        float scaleVal = 1.0f / invScale;
 
         // Copy out scale to HCCL window
         sqxLocal.SetValue(0, scaleVal);
