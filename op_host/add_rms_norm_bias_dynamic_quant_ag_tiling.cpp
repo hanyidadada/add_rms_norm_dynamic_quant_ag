@@ -14,8 +14,8 @@
  *
  * Tiling key encoding: (dtype_key * 10 + mode_key)
  *   dtype_key: 1 = half, 3 = bf16
- *   mode_key:  0 = SingleN, 1 = MultiN
- * Valid keys: 10, 30, 11, 31
+ *   mode_key:  0 = Normal, 3 = SingleN
+ * Valid keys: 10, 30, 13, 33
  */
 #include "add_rms_norm_bias_dynamic_quant_ag_info.h"
 #include "add_rms_norm_bias_dynamic_quant_ag_tiling.h"
@@ -35,7 +35,6 @@ constexpr uint32_t DTYPE_KEY_HALF  = 1;
 constexpr uint32_t DTYPE_KEY_BF16  = 3;
 constexpr uint32_t MODE_NORMAL     = 0;
 constexpr uint32_t MODE_SINGLE_N   = 3;
-constexpr uint32_t MODE_MULTI_N    = 4;
 
 constexpr uint32_t BLOCK_ALIGN_NUM = 16;
 constexpr uint32_t UB_RESERVED = 1024;                  // reserved UB space
@@ -370,10 +369,12 @@ static ge::graphStatus TilingAddRmsNormBiasDynamicQuantAG(gert::TilingContext* c
         rowTail = 1;
         lastBlockRowLoop = 1;
         lastBlockRowTail = 1;
-    } else if (modeKey == MODE_NORMAL) {
-        // Normal: block-based distribution like standalone add_rms_norm_bias
-        useCoreNum = std::min(numRow, numCore);
-        blockFactor = CeilDiv(numRow, useCoreNum);
+    } else {
+        // MODE_NORMAL: block-based distribution like standalone add_rms_norm_bias
+        blockFactor = 1U;
+        uint32_t tileNum = CeilDiv(numRow, numCore * blockFactor);
+        blockFactor *= tileNum;
+        useCoreNum = CeilDiv(numRow, blockFactor);
         latsBlockFactor = numRow - blockFactor * (useCoreNum - 1);
         rowFactor = 1;
         rowLoop = blockFactor;
@@ -381,16 +382,6 @@ static ge::graphStatus TilingAddRmsNormBiasDynamicQuantAG(gert::TilingContext* c
         lastBlockRowLoop = latsBlockFactor;
         lastBlockRowTail = 1;
         ubFactor = numColAlign;
-    } else {
-        // MultiN: head/tail distribution
-        CalculateMultiCoreDistribution(numRow, numCore, headCoreNum, rowPerHeadCore, rowPerTailCore, useCoreNum);
-        blockFactor = rowPerHeadCore;
-        latsBlockFactor = rowPerTailCore;
-        rowFactor = 1;
-        rowLoop = 1;
-        rowTail = 1;
-        lastBlockRowLoop = 1;
-        lastBlockRowTail = 1;
     }
 
     // 8. Calculate tiling key

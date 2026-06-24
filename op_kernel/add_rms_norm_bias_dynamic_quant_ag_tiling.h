@@ -34,7 +34,7 @@ typedef struct {
     uint32_t headCoreNum;    // number of head cores (with ceil rows)
     uint32_t rowPerHeadCore; // rows per head core
     uint32_t rowPerTailCore; // rows per tail core
-    uint32_t multiRowNum;    // rows processed per iteration in MultiN mode
+    uint32_t multiRowNum;    // rows processed per iteration
     uint32_t ubFactor;       // UB allocation factor (aligned col size)
     // MODE_NORMAL fields
     uint32_t blockFactor;    // rows per core (head cores)

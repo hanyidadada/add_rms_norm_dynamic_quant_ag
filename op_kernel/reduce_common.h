@@ -78,18 +78,6 @@ __aicore__ inline void ReduceSumForSmallReduceDim(
     }
 }
 
-__aicore__ inline void ReduceSumMultiN(
-    const LocalTensor<float>& dstLocal, const LocalTensor<float>& srcLocal, const LocalTensor<float>& tmpLocal4,
-    const uint32_t numRow, const uint32_t numCol, const uint32_t numColAlign)
-{
-    const uint32_t tailCount = numCol % ELEM_PER_REP_FP32;
-    const uint32_t repeat = numRow;
-    const uint8_t repStride = numColAlign / ELEM_PER_BLK_FP32;
-    Duplicate(tmpLocal4, ZERO, numRow * ELEM_PER_REP_FP32);
-    PipeBarrier<PIPE_V>();
-    ReduceSumForSmallReduceDim(dstLocal, srcLocal, tmpLocal4, numColAlign, numCol, tailCount, repeat, repStride);
-}
-
 __aicore__ inline int32_t findPowerTwo(int32_t n1)
 {
     n1 |= n1 >> 1;

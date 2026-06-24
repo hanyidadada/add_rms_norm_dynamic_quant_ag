@@ -14,7 +14,7 @@
  *
  * Tiling Key Encoding: (dtype_key * 10 + mode_key)
  *   dtype_key: 1 = half, 3 = bfloat16
- *   mode_key:  0 = Normal, 3 = SingleN, 4 = MultiN
+ *   mode_key:  0 = Normal, 3 = SingleN
  *
  * | Key | Template | Data Type |
  * |-----|----------|-----------|
@@ -22,13 +22,10 @@
  * | 30  | Normal   | bfloat16  |
  * | 13  | SingleN  | half      |
  * | 33  | SingleN  | bfloat16  |
- * | 14  | MultiN   | half      |
- * | 34  | MultiN   | bfloat16  |
  */
 
 #include "add_rms_norm_bias_dynamic_quant_ag_normal.h"
 #include "add_rms_norm_bias_dynamic_quant_ag_single_n.h"
-#include "add_rms_norm_bias_dynamic_quant_ag_multi_n.h"
 
 using namespace AscendC;
 
@@ -60,9 +57,5 @@ extern "C" __global__ __aicore__ void add_rms_norm_bias_dynamic_quant_ag(
         FUSION_AG_OP_IMPL(KernelAddRmsNormBiasDynamicQuantAGSingleN, half);
     } else if (TILING_KEY_IS(33)) {
         FUSION_AG_OP_IMPL(KernelAddRmsNormBiasDynamicQuantAGSingleN, bfloat16_t);
-    } else if (TILING_KEY_IS(14)) {
-        FUSION_AG_OP_IMPL(KernelAddRmsNormBiasDynamicQuantAGMultiN, half);
-    } else if (TILING_KEY_IS(34)) {
-        FUSION_AG_OP_IMPL(KernelAddRmsNormBiasDynamicQuantAGMultiN, bfloat16_t);
     }
 }

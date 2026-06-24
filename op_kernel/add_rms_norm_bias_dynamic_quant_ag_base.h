@@ -40,7 +40,6 @@ constexpr float MINUS_HALF_F = -0.5f;
 
 // DynamicQuant constants
 constexpr float DYNAMIC_QUANT_INT8_SYM_SCALE = 127.0f;
-constexpr float DYNAMIC_QUANT_INT8_RECIP_SCALE = 1.0f / 127.0f;
 constexpr float DYNAMIC_QUANT_EPSILON = 1e-12f;
 
 // AG constants

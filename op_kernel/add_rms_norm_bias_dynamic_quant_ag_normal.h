@@ -291,7 +291,16 @@ private:
         ReduceMaxInplace(sqxLocal, numCol);
         PipeBarrier<PIPE_V>();
 
-        // invScale = 127.0 / rowMax
+        // Read max_abs before Div overwrites it
+        event_t eventVS2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventVS2);
+        WaitFlag<HardEvent::V_S>(eventVS2);
+        float maxAbs = sqxLocal.GetValue(0);
+        event_t eventSV2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventSV2);
+        WaitFlag<HardEvent::S_V>(eventSV2);
+
+        // invScale = 127.0 / max_abs
         LocalTensor<float> constScale = tmpLocal;
         Duplicate<float>(constScale, DYNAMIC_QUANT_INT8_SYM_SCALE, 1);
         PipeBarrier<PIPE_V>();
@@ -299,15 +308,15 @@ private:
         PipeBarrier<PIPE_V>();
 
         // Extract invScale scalar
-        event_t eventVS2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(eventVS2);
-        WaitFlag<HardEvent::V_S>(eventVS2);
+        event_t eventVS3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventVS3);
+        WaitFlag<HardEvent::V_S>(eventVS3);
         float invScale = sqxLocal.GetValue(0);
-        event_t eventSV2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
-        SetFlag<HardEvent::S_V>(eventSV2);
-        WaitFlag<HardEvent::S_V>(eventSV2);
+        event_t eventSV3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventSV3);
+        WaitFlag<HardEvent::S_V>(eventSV3);
 
-        // scaleOut = max_abs / 127.0
+        // scale = max_abs / 127.0 — matches standalone dynamic_quant
         float scaleVal = 1.0f / invScale;
 
         // Copy out scale to HCCL window
@@ -503,7 +512,16 @@ private:
         ReduceMaxInplace(sqxLocal, numCol);
         PipeBarrier<PIPE_V>();
 
-        // invScale = 127.0 / rowMax
+        // Read max_abs before Div overwrites it
+        event_t eventVS2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventVS2);
+        WaitFlag<HardEvent::V_S>(eventVS2);
+        float maxAbs = sqxLocal.GetValue(0);
+        event_t eventSV2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventSV2);
+        WaitFlag<HardEvent::S_V>(eventSV2);
+
+        // invScale = 127.0 / max_abs
         LocalTensor<float> constScaleBf16 = tmpLocal;
         Duplicate<float>(constScaleBf16, DYNAMIC_QUANT_INT8_SYM_SCALE, 1);
         PipeBarrier<PIPE_V>();
@@ -511,15 +529,15 @@ private:
         PipeBarrier<PIPE_V>();
 
         // Extract invScale scalar
-        event_t eventVS2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(eventVS2);
-        WaitFlag<HardEvent::V_S>(eventVS2);
+        event_t eventVS3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventVS3);
+        WaitFlag<HardEvent::V_S>(eventVS3);
         float invScale = sqxLocal.GetValue(0);
-        event_t eventSV2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
-        SetFlag<HardEvent::S_V>(eventSV2);
-        WaitFlag<HardEvent::S_V>(eventSV2);
+        event_t eventSV3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventSV3);
+        WaitFlag<HardEvent::S_V>(eventSV3);
 
-        // scaleOut = max_abs / 127.0
+        // scale = max_abs / 127.0 — matches standalone dynamic_quant
         float scaleVal = 1.0f / invScale;
 
         // Copy out scale to HCCL window
