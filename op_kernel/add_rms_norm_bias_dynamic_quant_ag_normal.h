@@ -49,7 +49,7 @@ public:
         this->numCol = tiling->numCol;
         this->ubFactor = tiling->ubFactor;
         this->epsilon = tiling->epsilon;
-        this->avgFactor = (numCol != 0) ? (1.0f / static_cast<float>(numCol)) : 0.0f;
+        this->avgFactor = (numCol != 0) ? (1.0f / numCol) : 0.0f;
         this->dstType = tiling->dstType;
         this->blockFactor = tiling->blockFactor;
         this->latsBlockFactor = tiling->latsBlockFactor;
@@ -274,24 +274,28 @@ private:
     }
 
     // ---- Stage 3: DynamicQuant (FP16) ----
+    // Matches standalone dynamic_quant Db kernel: cast to FP32 first (save signed data),
+    // then FP16 Abs+ReduceMax on the original buffer for maxAbs
     __aicore__ inline void StageDynamicQuantFp16(uint32_t row,
         LocalTensor<T>& x1Local,
         LocalTensor<float>& xFp32Local, LocalTensor<float>& sqxLocal, LocalTensor<float>& tmpLocal,
         LocalTensor<int8_t>& outInt8Local)
     {
-        // Cast FP16 → FP32 (quant input, stays in UB — fusion key!)
+        // Cast FP16 → FP32 first (save signed data, matching Db's tempCast)
         Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
         PipeBarrier<PIPE_V>();
 
-        // abs(xFp32)
-        Abs(sqxLocal, xFp32Local, numCol);
+        // FP16 Abs+ReduceMax on original buffer — matches Db ComputeRowMax (FP16, no smooth)
+        Abs(x1Local, x1Local, numCol);
+        PipeBarrier<PIPE_V>();
+        ReduceMaxInplace(x1Local, numCol);
         PipeBarrier<PIPE_V>();
 
-        // Reduce max in-place
-        ReduceMaxInplace(sqxLocal, numCol);
+        // Cast the reduced FP16 max to FP32
+        Cast(sqxLocal, x1Local, RoundMode::CAST_NONE, 1);
         PipeBarrier<PIPE_V>();
 
-        // Read max_abs before Div overwrites it
+        // Read max_abs (FP16-precision, matching Db)
         event_t eventVS2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
         SetFlag<HardEvent::V_S>(eventVS2);
         WaitFlag<HardEvent::V_S>(eventVS2);
@@ -316,8 +320,8 @@ private:
         SetFlag<HardEvent::S_V>(eventSV3);
         WaitFlag<HardEvent::S_V>(eventSV3);
 
-        // scale = max_abs / 127.0 — matches standalone dynamic_quant
-        float scaleVal = 1.0f / invScale;
+        // scale = max_abs * (1.0/127.0) — matches Db QuantizeRow constInvScale multiplication
+        float scaleVal = maxAbs * DYNAMIC_QUANT_INT8_RECIP_SCALE;
 
         // Copy out scale to HCCL window
         sqxLocal.SetValue(0, scaleVal);
@@ -330,7 +334,7 @@ private:
         scaleCopyParams.blockCount = 1;
         DataCopyPad(scaleGm[row], sqxLocal, scaleCopyParams);
 
-        // xFp32 *= invScale
+        // xFp32Local still has signed FP32 data from the initial Cast — quantize it
         Muls(xFp32Local, xFp32Local, invScale, numCol);
         PipeBarrier<PIPE_V>();
 
@@ -537,8 +541,8 @@ private:
         SetFlag<HardEvent::S_V>(eventSV3);
         WaitFlag<HardEvent::S_V>(eventSV3);
 
-        // scale = max_abs / 127.0 — matches standalone dynamic_quant
-        float scaleVal = 1.0f / invScale;
+        // scale = max_abs * (1.0/127.0) — matches Db QuantizeRow constInvScale multiplication
+        float scaleVal = maxAbs * DYNAMIC_QUANT_INT8_RECIP_SCALE;
 
         // Copy out scale to HCCL window
         sqxLocal.SetValue(0, scaleVal);
