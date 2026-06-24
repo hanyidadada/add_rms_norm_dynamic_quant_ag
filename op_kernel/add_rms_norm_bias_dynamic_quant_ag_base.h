@@ -40,6 +40,7 @@ constexpr float MINUS_HALF_F = -0.5f;
 
 // DynamicQuant constants
 constexpr float DYNAMIC_QUANT_INT8_SYM_SCALE = 127.0f;
+constexpr float DYNAMIC_QUANT_INT8_RECIP_SCALE = 1.0f / 127.0f;
 constexpr float DYNAMIC_QUANT_EPSILON = 1e-12f;
 
 // AG constants
@@ -200,6 +201,26 @@ __aicore__ inline void ReduceMaxInplace(const LocalTensor<float>& src_local, uin
         PipeBarrier<PIPE_V>();
     }
     uint32_t mask = repsFp32 > 0 ? NUM_PER_REP_FP32 : count;
+    WholeReduceMax(src_local, src_local, mask, 1, 8, 1, 8);
+}
+
+__aicore__ inline void ReduceMaxInplace(const LocalTensor<half>& src_local, uint32_t count)
+{
+    constexpr uint32_t ELEM_PER_REP_HALF = 128;
+    uint64_t repsHalf = count >> 7;       // count / 128
+    uint64_t offsetsHalf = repsHalf << 7; // repsHalf * 128
+    uint64_t remsHalf = count & 0x7f;     // count % 128
+
+    if (likely(repsHalf > 1)) {
+        Max(src_local, src_local[ELEM_PER_REP_HALF], src_local, ELEM_PER_REP_HALF, repsHalf - 1,
+            {1, 1, 1, 0, 8, 0});
+        PipeBarrier<PIPE_V>();
+    }
+    if (unlikely(remsHalf > 0) && unlikely(offsetsHalf > 0)) {
+        Max(src_local, src_local[offsetsHalf], src_local, remsHalf, 1, {1, 1, 1, 0, 8, 0});
+        PipeBarrier<PIPE_V>();
+    }
+    uint32_t mask = repsHalf > 0 ? ELEM_PER_REP_HALF : count;
     WholeReduceMax(src_local, src_local, mask, 1, 8, 1, 8);
 }
 

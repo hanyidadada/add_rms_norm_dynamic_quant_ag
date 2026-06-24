@@ -49,7 +49,7 @@ public:
         this->numCol = tiling->numCol;
         this->ubFactor = tiling->ubFactor;
         this->epsilon = tiling->epsilon;
-        this->avgFactor = (numCol != 0) ? (1.0f / static_cast<float>(numCol)) : 0.0f;
+        this->avgFactor = (numCol != 0) ? (1.0f / numCol) : 0.0f;
         this->dstType = tiling->dstType;
         this->blockFactor = tiling->blockFactor;
         this->latsBlockFactor = tiling->latsBlockFactor;
