@@ -33,8 +33,9 @@ namespace optiling {
 // Tiling key encoding
 constexpr uint32_t DTYPE_KEY_HALF  = 1;
 constexpr uint32_t DTYPE_KEY_BF16  = 3;
-constexpr uint32_t MODE_SINGLE_N   = 0;
-constexpr uint32_t MODE_MULTI_N    = 1;
+constexpr uint32_t MODE_NORMAL     = 0;
+constexpr uint32_t MODE_SINGLE_N   = 3;
+constexpr uint32_t MODE_MULTI_N    = 4;
 
 constexpr uint32_t BLOCK_ALIGN_NUM = 16;
 constexpr uint32_t UB_RESERVED = 1024;                  // reserved UB space
@@ -271,26 +272,20 @@ static uint32_t DetermineModeAndRows(
     // Align numCol to block size
     ubFactor = AlignUp<BLOCK_ALIGN_NUM>(numCol);
 
-    // Estimate UB required per row (SingleN: ubFactor * 17 bytes)
-    // MultiN layout adds rstd block: NUM_PER_BLK_FP32 * sizeof(float) = 32 bytes per row
-    // and outInt8 is numCol bytes instead of ceil(numCol/4)*4 in float view,
-    // but the dominant difference is the 32-byte rstd block.
+    // Estimate UB required per row (ubFactor * 17 bytes)
     uint64_t ubPerRow = static_cast<uint64_t>(ubFactor) * coeff;
-    ubPerRow += 32;  // rstd block overhead for MultiN mode
 
-    // Calculate max rows that fit in UB
+    // Calculate max rows that fit in UB (for multi-row mode assessment)
     uint32_t maxRows = static_cast<uint32_t>(ubSize / ubPerRow);
 
-    if (maxRows < 1) {
-        multiRowNum = 1;
-        ubFactor = AlignUp<BLOCK_ALIGN_NUM>(numCol);
-        return MODE_SINGLE_N;
-    } else if (maxRows == 1) {
+    if (maxRows < 2) {
+        // UB only fits 1 row → MODE_SINGLE_N
         multiRowNum = 1;
         return MODE_SINGLE_N;
     } else {
-        multiRowNum = maxRows;
-        return MODE_MULTI_N;
+        // Default: MODE_NORMAL — processes 1 row at a time, no stride-8 issues
+        multiRowNum = 1;
+        return MODE_NORMAL;
     }
 }
 
@@ -346,17 +341,57 @@ static ge::graphStatus TilingAddRmsNormBiasDynamicQuantAG(gert::TilingContext* c
     auto dataType = context->GetInputDesc(IDX_X1)->GetDataType();
     uint32_t dtypeKey = GetDtypeKey(dataType);
 
-    // 6. Calculate multi-core distribution
+    // 6. Determine mode and UB parameters
+    uint32_t multiRowNum = 1;
+    uint32_t ubFactor = 0;
+    uint32_t modeKey = DetermineModeAndRows(numCol, ubSize, dataType, multiRowNum, ubFactor);
+
+    // 7. Calculate per-core distribution based on mode
     uint32_t headCoreNum = 0;
     uint32_t rowPerHeadCore = 0;
     uint32_t rowPerTailCore = 0;
     uint32_t useCoreNum = 0;
-    CalculateMultiCoreDistribution(numRow, numCore, headCoreNum, rowPerHeadCore, rowPerTailCore, useCoreNum);
+    uint32_t blockFactor = 0;
+    uint32_t latsBlockFactor = 0;
+    uint32_t rowFactor = 1;
+    uint32_t rowLoop = 0;
+    uint32_t rowTail = 0;
+    uint32_t lastBlockRowLoop = 0;
+    uint32_t lastBlockRowTail = 0;
+    uint32_t numColAlign = AlignUp<BLOCK_ALIGN_NUM>(numCol);
 
-    // 7. Determine mode and UB parameters
-    uint32_t multiRowNum = 1;
-    uint32_t ubFactor = 0;
-    uint32_t modeKey = DetermineModeAndRows(numCol, ubSize, dataType, multiRowNum, ubFactor);
+    if (modeKey == MODE_SINGLE_N) {
+        // SingleN: head/tail distribution, 1 row per core
+        CalculateMultiCoreDistribution(numRow, numCore, headCoreNum, rowPerHeadCore, rowPerTailCore, useCoreNum);
+        blockFactor = rowPerHeadCore;
+        latsBlockFactor = rowPerTailCore;
+        rowFactor = 1;
+        rowLoop = 1;
+        rowTail = 1;
+        lastBlockRowLoop = 1;
+        lastBlockRowTail = 1;
+    } else if (modeKey == MODE_NORMAL) {
+        // Normal: block-based distribution like standalone add_rms_norm_bias
+        useCoreNum = std::min(numRow, numCore);
+        blockFactor = CeilDiv(numRow, useCoreNum);
+        latsBlockFactor = numRow - blockFactor * (useCoreNum - 1);
+        rowFactor = 1;
+        rowLoop = blockFactor;
+        rowTail = 1;
+        lastBlockRowLoop = latsBlockFactor;
+        lastBlockRowTail = 1;
+        ubFactor = numColAlign;
+    } else {
+        // MultiN: head/tail distribution
+        CalculateMultiCoreDistribution(numRow, numCore, headCoreNum, rowPerHeadCore, rowPerTailCore, useCoreNum);
+        blockFactor = rowPerHeadCore;
+        latsBlockFactor = rowPerTailCore;
+        rowFactor = 1;
+        rowLoop = 1;
+        rowTail = 1;
+        lastBlockRowLoop = 1;
+        lastBlockRowTail = 1;
+    }
 
     // 8. Calculate tiling key
     uint32_t tilingKey = (dtypeKey * 10) + modeKey;
@@ -392,6 +427,14 @@ static ge::graphStatus TilingAddRmsNormBiasDynamicQuantAG(gert::TilingContext* c
     tilingData->rowPerTailCore = rowPerTailCore;
     tilingData->multiRowNum    = multiRowNum;
     tilingData->ubFactor       = ubFactor;
+    tilingData->blockFactor    = blockFactor;
+    tilingData->latsBlockFactor = latsBlockFactor;
+    tilingData->rowFactor      = rowFactor;
+    tilingData->rowLoop        = rowLoop;
+    tilingData->rowTail        = rowTail;
+    tilingData->lastBlockRowLoop = lastBlockRowLoop;
+    tilingData->lastBlockRowTail = lastBlockRowTail;
+    tilingData->numColAlign    = numColAlign;
 
     // 11. MC2 AlltoAll communication configuration
     uint32_t opType = 8; // batch write

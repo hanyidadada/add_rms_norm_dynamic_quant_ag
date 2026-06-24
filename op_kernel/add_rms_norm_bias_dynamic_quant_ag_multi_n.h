@@ -268,11 +268,11 @@ private:
             int32_t bodyCnt  = repTimes * NUM_PER_REP_FP32;
             if (likely(repTimes > 0)) {
                 Div(rstdBlock, tmpBlock, rstdBlock, NUM_PER_REP_FP32, repTimes,
-                    {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
+                    {0, 0, DEFAULT_REPEAT_STRIDE, 1, 0, 1});
             }
             if (unlikely(tailCnt != 0)) {
                 Div(rstdBlock[bodyCnt], tmpBlock, rstdBlock[bodyCnt], tailCnt, 1,
-                    {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
+                    {0, 0, DEFAULT_REPEAT_STRIDE, 1, 0, 1});
             }
         }
         PipeBarrier<PIPE_V>();
@@ -528,11 +528,11 @@ private:
             int32_t bodyCnt  = repTimes * NUM_PER_REP_FP32;
             if (likely(repTimes > 0)) {
                 Div(rstdBlock, tmpBlock, rstdBlock, NUM_PER_REP_FP32, repTimes,
-                    {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
+                    {0, 0, DEFAULT_REPEAT_STRIDE, 1, 0, 1});
             }
             if (unlikely(tailCnt != 0)) {
                 Div(rstdBlock[bodyCnt], tmpBlock, rstdBlock[bodyCnt], tailCnt, 1,
-                    {1, 0, 1, DEFAULT_REPEAT_STRIDE, 0, DEFAULT_REPEAT_STRIDE});
+                    {0, 0, DEFAULT_REPEAT_STRIDE, 1, 0, 1});
             }
         }
         PipeBarrier<PIPE_V>();

@@ -36,6 +36,15 @@ typedef struct {
     uint32_t rowPerTailCore; // rows per tail core
     uint32_t multiRowNum;    // rows processed per iteration in MultiN mode
     uint32_t ubFactor;       // UB allocation factor (aligned col size)
+    // MODE_NORMAL fields
+    uint32_t blockFactor;    // rows per core (head cores)
+    uint32_t latsBlockFactor;// rows for last core (tail)
+    uint32_t rowFactor;      // rows per inner loop iteration (rstd batch size)
+    uint32_t rowLoop;        // inner loop count (head cores)
+    uint32_t rowTail;        // tail rows in last inner loop iteration (head cores)
+    uint32_t lastBlockRowLoop;  // inner loop count (last core)
+    uint32_t lastBlockRowTail;  // tail rows in last inner loop iteration (last core)
+    uint32_t numColAlign;    // aligned numCol (to BLOCK_ALIGN_NUM)
 } AddRmsNormBiasDynamicQuantAGTilingData;
 
 #endif // OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_BIAS_DYN_QUANT_AG_TILING_H
