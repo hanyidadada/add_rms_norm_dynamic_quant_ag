@@ -33,15 +33,15 @@ using namespace AscendC;
 #define FUSION_AG_OP_IMPL(templateClass, T)          \
     do {                                               \
         templateClass<T> op(&pipe);                    \
-        op.Init(x1, x2, gamma,                         \
-                yQuant, scale, x, y, rstd,            \
+        op.Init(x1, x2, gamma, bias,                  \
+                yQuant, scale, x,                     \
                 workspace, &tilingData);               \
         op.Process();                                  \
     } while (0)
 
 extern "C" __global__ __aicore__ void add_rms_norm_bias_dynamic_quant_ag(
-    GM_ADDR x1, GM_ADDR x2, GM_ADDR gamma,
-    GM_ADDR yQuant, GM_ADDR scale, GM_ADDR x, GM_ADDR y, GM_ADDR rstd,
+    GM_ADDR x1, GM_ADDR x2, GM_ADDR gamma, GM_ADDR bias,
+    GM_ADDR yQuant, GM_ADDR scale, GM_ADDR x,
     GM_ADDR workspace, GM_ADDR tiling)
 {
     TPipe pipe;

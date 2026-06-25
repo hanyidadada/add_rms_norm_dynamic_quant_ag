@@ -51,11 +51,10 @@ constexpr uint32_t UB_PER_ROW_BF16_COEFF = 17;
 static constexpr int IDX_X1      = 0;
 static constexpr int IDX_X2      = 1;
 static constexpr int IDX_GAMMA   = 2;
+static constexpr int IDX_BIAS    = 3;
 static constexpr int IDX_YQUANT  = 0;
 static constexpr int IDX_SCALE   = 1;
 static constexpr int IDX_X       = 2;   // add result
-static constexpr int IDX_Y       = 3;   // rmsnorm result
-static constexpr int IDX_RSTD    = 4;
 
 // AG attribute indices
 static constexpr int GROUP_IDX = 2;
@@ -79,35 +78,23 @@ static uint32_t CeilDiv(uint32_t x, uint32_t y)
 static bool CheckNullptr(gert::TilingContext* context)
 {
     const gert::StorageShape* x1Shape     = context->GetInputShape(IDX_X1);
-    const gert::StorageShape* x2Shape     = context->GetInputShape(IDX_X2);
     const gert::StorageShape* gammaShape  = context->GetInputShape(IDX_GAMMA);
     const gert::StorageShape* yQuantShape = context->GetOutputShape(IDX_YQUANT);
     const gert::StorageShape* scaleShape  = context->GetOutputShape(IDX_SCALE);
     const gert::StorageShape* xShape      = context->GetOutputShape(IDX_X);
-    const gert::StorageShape* yShape      = context->GetOutputShape(IDX_Y);
-    const gert::StorageShape* rstdShape   = context->GetOutputShape(IDX_RSTD);
 
     OP_CHECK_NULL_WITH_CONTEXT(context, x1Shape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, x2Shape);
     OP_CHECK_NULL_WITH_CONTEXT(context, gammaShape);
     OP_CHECK_NULL_WITH_CONTEXT(context, yQuantShape);
     OP_CHECK_NULL_WITH_CONTEXT(context, scaleShape);
     OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, yShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, rstdShape);
     return true;
 }
 
 static bool CheckDataType(gert::TilingContext* context)
 {
     auto x1Dtype    = context->GetInputDesc(IDX_X1)->GetDataType();
-    auto x2Dtype    = context->GetInputDesc(IDX_X2)->GetDataType();
     auto gammaDtype = context->GetInputDesc(IDX_GAMMA)->GetDataType();
-
-    OP_CHECK_IF(
-        x1Dtype != x2Dtype,
-        OPS_LOG_E(context->GetNodeName(), "x1 and x2 must have the same data type."),
-        return false);
 
     OP_CHECK_IF(
         x1Dtype != gammaDtype,
@@ -119,28 +106,40 @@ static bool CheckDataType(gert::TilingContext* context)
         OPS_LOG_E(context->GetNodeName(), "data type must be FP16 or BF16."),
         return false);
 
+    // optional x2 type check
+    auto x2Desc = context->GetOptionalInputDesc(IDX_X2);
+    if (x2Desc != nullptr) {
+        OP_CHECK_IF(
+            x1Dtype != x2Desc->GetDataType(),
+            OPS_LOG_E(context->GetNodeName(), "x1 and x2 must have the same data type."),
+            return false);
+    }
+
+    // optional bias type check
+    auto biasDesc = context->GetOptionalInputDesc(IDX_BIAS);
+    if (biasDesc != nullptr) {
+        OP_CHECK_IF(
+            x1Dtype != biasDesc->GetDataType(),
+            OPS_LOG_E(context->GetNodeName(), "x1 and bias must have the same data type."),
+            return false);
+    }
+
     return true;
 }
 
 static bool CheckInputOutputDim(gert::TilingContext* context)
 {
     const gert::StorageShape* x1Shape     = context->GetInputShape(IDX_X1);
-    const gert::StorageShape* x2Shape     = context->GetInputShape(IDX_X2);
     const gert::StorageShape* gammaShape  = context->GetInputShape(IDX_GAMMA);
     const gert::StorageShape* yQuantShape = context->GetOutputShape(IDX_YQUANT);
     const gert::StorageShape* scaleShape  = context->GetOutputShape(IDX_SCALE);
     const gert::StorageShape* xShape      = context->GetOutputShape(IDX_X);
-    const gert::StorageShape* yShape      = context->GetOutputShape(IDX_Y);
-    const gert::StorageShape* rstdShape   = context->GetOutputShape(IDX_RSTD);
 
     size_t x1DimNum     = x1Shape->GetStorageShape().GetDimNum();
-    size_t x2DimNum     = x2Shape->GetStorageShape().GetDimNum();
     size_t gammaDimNum  = gammaShape->GetStorageShape().GetDimNum();
     size_t yQuantDimNum = yQuantShape->GetStorageShape().GetDimNum();
     size_t scaleDimNum  = scaleShape->GetStorageShape().GetDimNum();
     size_t xDimNum      = xShape->GetStorageShape().GetDimNum();
-    size_t yDimNum      = yShape->GetStorageShape().GetDimNum();
-    size_t rstdDimNum   = rstdShape->GetStorageShape().GetDimNum();
 
     // x1 dims should be 2-8
     OP_CHECK_IF(
@@ -148,10 +147,10 @@ static bool CheckInputOutputDim(gert::TilingContext* context)
         OPS_LOG_E(context->GetNodeName(), "x1 dim num must be in range [2, 8]."),
         return false);
 
-    // x1, x2, yQuant, x, y must have same dims
+    // x1, yQuant, x must have same dims
     OP_CHECK_IF(
-        x1DimNum != x2DimNum || x1DimNum != yQuantDimNum || x1DimNum != xDimNum || x1DimNum != yDimNum,
-        OPS_LOG_E(context->GetNodeName(), "x1, x2, yQuant, x, y must have same dims."),
+        x1DimNum != yQuantDimNum || x1DimNum != xDimNum,
+        OPS_LOG_E(context->GetNodeName(), "x1, yQuant, x must have same dims."),
         return false);
 
     // gamma dims: must be <= x1 dims
@@ -164,12 +163,6 @@ static bool CheckInputOutputDim(gert::TilingContext* context)
     OP_CHECK_IF(
         scaleDimNum != x1DimNum - 1,
         OPS_LOG_E(context->GetNodeName(), "scale dim num should be x1 dim num - 1."),
-        return false);
-
-    // rstd dims = x1 dims
-    OP_CHECK_IF(
-        rstdDimNum != x1DimNum,
-        OPS_LOG_E(context->GetNodeName(), "rstd dim num should be same as x1 dim num."),
         return false);
 
     // last dim of x1 and gamma must match
@@ -445,6 +438,8 @@ static ge::graphStatus TilingAddRmsNormBiasDynamicQuantAG(gert::TilingContext* c
     tilingData->lastBlockRowLoop = lastBlockRowLoop;
     tilingData->lastBlockRowTail = lastBlockRowTail;
     tilingData->numColAlign    = numColAlign;
+    tilingData->hasX2          = (context->GetOptionalInputDesc(IDX_X2) != nullptr) ? 1 : 0;
+    tilingData->hasBias        = (context->GetOptionalInputDesc(IDX_BIAS) != nullptr) ? 1 : 0;
 
     // 11. MC2 AlltoAll communication configuration
     uint32_t opType = 8; // batch write

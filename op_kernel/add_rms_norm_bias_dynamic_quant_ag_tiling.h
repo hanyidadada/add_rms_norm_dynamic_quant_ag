@@ -45,6 +45,8 @@ typedef struct {
     uint32_t lastBlockRowLoop;  // inner loop count (last core)
     uint32_t lastBlockRowTail;  // tail rows in last inner loop iteration (last core)
     uint32_t numColAlign;    // aligned numCol (to BLOCK_ALIGN_NUM)
+    uint32_t hasX2;          // 1 if x2 input is provided, 0 otherwise
+    uint32_t hasBias;        // 1 if bias input is provided, 0 otherwise
 } AddRmsNormBiasDynamicQuantAGTilingData;
 
 #endif // OPS_BUILT_IN_OP_TILING_RUNTIME_ADD_RMS_NORM_BIAS_DYN_QUANT_AG_TILING_H

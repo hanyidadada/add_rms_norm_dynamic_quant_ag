@@ -39,8 +39,8 @@ public:
     }
 
     __aicore__ inline void Init(
-        GM_ADDR x1, GM_ADDR x2, GM_ADDR gamma,
-        GM_ADDR yQuant, GM_ADDR scale, GM_ADDR x, GM_ADDR y, GM_ADDR rstd,
+        GM_ADDR x1, GM_ADDR x2, GM_ADDR gamma, GM_ADDR bias,
+        GM_ADDR yQuant, GM_ADDR scale, GM_ADDR x,
         GM_ADDR workspace, const AddRmsNormBiasDynamicQuantAGTilingData* tiling)
     {
         ASSERT(GetBlockNum() != 0 && "Block dim can not be zero!");
@@ -54,6 +54,8 @@ public:
         this->blockFactor = tiling->blockFactor;
         this->latsBlockFactor = tiling->latsBlockFactor;
         this->coreNum = tiling->coreNum;
+        this->hasX2 = tiling->hasX2;
+        this->hasBias = tiling->hasBias;
 
         this->blockIdx_ = GetBlockIdx();
 
@@ -89,8 +91,13 @@ public:
 
         // Set up global tensors
         x1Gm.SetGlobalBuffer((__gm__ T*)x1 + rowOffset * numCol, rowWork * numCol);
-        x2Gm.SetGlobalBuffer((__gm__ T*)x2 + rowOffset * numCol, rowWork * numCol);
+        if (this->hasX2) {
+            x2Gm.SetGlobalBuffer((__gm__ T*)x2 + rowOffset * numCol, rowWork * numCol);
+        }
         gammaGm.SetGlobalBuffer((__gm__ T*)gamma, numCol);
+        if (this->hasBias) {
+            biasGm.SetGlobalBuffer((__gm__ T*)bias, numCol);
+        }
 
         // Quantized output redirected to HCCL window
         uint32_t offsetScale = this->rowTotalNum * this->rowLen;
@@ -99,10 +106,8 @@ public:
         scaleGm.SetGlobalBuffer(
             (__gm__ float*)(this->buff[this->rankId] + offsetScale) + rowOffset, rowWork);
 
-        // Intermediate outputs: x (add result), y (rmsnorm result)
+        // Intermediate output: x (add result)
         xGm.SetGlobalBuffer((__gm__ T*)x + rowOffset * numCol, rowWork * numCol);
-        yGm.SetGlobalBuffer((__gm__ T*)y + rowOffset * numCol, rowWork * numCol);
-        rstdGm.SetGlobalBuffer((__gm__ float*)rstd + rowOffset, rowWork);
 
         pPipe->InitBuffer(unitBuf, MAX_BUFFER);
     }
@@ -175,27 +180,21 @@ private:
     {
         // Load x1
         DataCopyCustom<T>(x1Local, x1Gm[row * numCol], numCol);
-        event_t eventMTE2V1 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-        SetFlag<HardEvent::MTE2_V>(eventMTE2V1);
-
-        // Load x2
-        DataCopyCustom<T>(x2Local, x2Gm[row * numCol], numCol);
-        event_t eventMTE2V2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-        WaitFlag<HardEvent::MTE2_V>(eventMTE2V1);
-        SetFlag<HardEvent::MTE2_V>(eventMTE2V2);
-        WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
-
-        // FP16 Add: x1Local = x1 + x2
-        Add(x1Local, x1Local, x2Local, numCol);
         PipeBarrier<PIPE_V>();
 
+        // Load x2 if provided
+        if (this->hasX2) {
+            DataCopyCustom<T>(x2Local, x2Gm[row * numCol], numCol);
+            PipeBarrier<PIPE_V>();
+
+            // FP16 Add: x1Local = x1 + x2
+            Add(x1Local, x1Local, x2Local, numCol);
+            PipeBarrier<PIPE_V>();
+        }
+
         // Copy out x (add result)
-        event_t eventVMTE3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
-        SetFlag<HardEvent::V_MTE3>(eventVMTE3);
-        WaitFlag<HardEvent::V_MTE3>(eventVMTE3);
         DataCopyCustom<T>(xGm[row * numCol], x1Local, numCol);
-        event_t eventMTE3V = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
-        SetFlag<HardEvent::MTE3_V>(eventMTE3V);
+        PipeBarrier<PIPE_V>();
     }
 
     // ---- Stage 2: RmsNorm (FP16) ----
@@ -204,12 +203,8 @@ private:
         LocalTensor<float>& xFp32Local, LocalTensor<float>& sqxLocal, LocalTensor<float>& tmpLocal)
     {
         // Copy gamma into x2Local (reuse buffer)
-        event_t eventVMTE2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
-        SetFlag<HardEvent::V_MTE2>(eventVMTE2);
-        WaitFlag<HardEvent::V_MTE2>(eventVMTE2);
         DataCopyCustom<T>(x2Local, gammaGm, numCol);
-        event_t eventMTE2V2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-        SetFlag<HardEvent::MTE2_V>(eventMTE2V2);
+        PipeBarrier<PIPE_V>();
 
         // Cast FP16 → FP32
         Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
@@ -236,44 +231,30 @@ private:
         Div(sqxLocal, tmpLocal, sqxLocal, 1);
         PipeBarrier<PIPE_V>();
 
-        // Copy out rstd
-        event_t eventVMTE3Rstd = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
-        SetFlag<HardEvent::V_MTE3>(eventVMTE3Rstd);
-        WaitFlag<HardEvent::V_MTE3>(eventVMTE3Rstd);
-        DataCopyParams rstdCopyParams;
-        rstdCopyParams.blockLen = sizeof(float);
-        rstdCopyParams.blockCount = 1;
-        DataCopyPad(rstdGm[row], sqxLocal, rstdCopyParams);
-
         // Extract rstd scalar
-        event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(eventVS);
-        WaitFlag<HardEvent::V_S>(eventVS);
         float rstdValue = sqxLocal.GetValue(0);
-        event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
-        SetFlag<HardEvent::S_V>(eventSV);
-        WaitFlag<HardEvent::S_V>(eventSV);
+        PipeBarrier<PIPE_V>();
 
         // x_norm = x * rstd
         Muls(xFp32Local, xFp32Local, rstdValue, numCol);
         PipeBarrier<PIPE_V>();
 
         // Cast FP32 → FP16
-        event_t eventMTE3V = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
-        WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
+        PipeBarrier<PIPE_V>();
         Cast(x1Local, xFp32Local, RoundMode::CAST_NONE, numCol);
         PipeBarrier<PIPE_V>();
 
         // Multiply by gamma (FP16)
-        WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
         Mul(x1Local, x1Local, x2Local, numCol);
         PipeBarrier<PIPE_V>();
 
-        // Copy out y (rmsnorm result)
-        event_t eventVMTE3Y = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
-        SetFlag<HardEvent::V_MTE3>(eventVMTE3Y);
-        WaitFlag<HardEvent::V_MTE3>(eventVMTE3Y);
-        DataCopyCustom<T>(yGm[row * numCol], x1Local, numCol);
+        // Add bias if provided (FP16)
+        if (this->hasBias) {
+            DataCopyCustom<T>(x2Local, biasGm, numCol);
+            PipeBarrier<PIPE_V>();
+            Add(x1Local, x1Local, x2Local, numCol);
+            PipeBarrier<PIPE_V>();
+        }
     }
 
     // ---- Stage 3: DynamicQuant (FP16) ----
@@ -371,36 +352,30 @@ private:
     {
         // Load x1
         DataCopyCustom<T>(x1Local, x1Gm[row * numCol], numCol);
-        event_t eventMTE2V1 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-        SetFlag<HardEvent::MTE2_V>(eventMTE2V1);
+        PipeBarrier<PIPE_V>();
 
-        // Load x2
-        DataCopyCustom<T>(x2Local, x2Gm[row * numCol], numCol);
-        event_t eventMTE2V2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-        SetFlag<HardEvent::MTE2_V>(eventMTE2V2);
-        WaitFlag<HardEvent::MTE2_V>(eventMTE2V1);
-        WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
+        if (this->hasX2) {
+            // Load x2
+            DataCopyCustom<T>(x2Local, x2Gm[row * numCol], numCol);
+            PipeBarrier<PIPE_V>();
 
-        // BF16: cast both to FP32, add, cast back to BF16
-        Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
-        Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);
-        PipeBarrier<PIPE_V>();
-        Add(xFp32Local, xFp32Local, sqxLocal, numCol);
-        PipeBarrier<PIPE_V>();
-        Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
-        PipeBarrier<PIPE_V>();
+            // BF16: cast both to FP32, add, cast back to BF16
+            Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
+            Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);
+            PipeBarrier<PIPE_V>();
+            Add(xFp32Local, xFp32Local, sqxLocal, numCol);
+            PipeBarrier<PIPE_V>();
+            Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
+            PipeBarrier<PIPE_V>();
+        }
 
         // Reload BF16-rounded values for rmsnorm consistency (match standalone kernel precision)
         Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
         PipeBarrier<PIPE_V>();
 
         // Copy out x (add result)
-        event_t eventVMTE3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
-        SetFlag<HardEvent::V_MTE3>(eventVMTE3);
-        WaitFlag<HardEvent::V_MTE3>(eventVMTE3);
         DataCopyCustom<T>(xGm[row * numCol], x1Local, numCol);
-        event_t eventMTE3V = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
-        SetFlag<HardEvent::MTE3_V>(eventMTE3V);
+        PipeBarrier<PIPE_V>();
     }
 
     // ---- Stage 2: RmsNorm (BF16) ----
@@ -409,12 +384,8 @@ private:
         LocalTensor<float>& xFp32Local, LocalTensor<float>& sqxLocal, LocalTensor<float>& tmpLocal)
     {
         // Copy gamma
-        event_t eventVMTE2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
-        SetFlag<HardEvent::V_MTE2>(eventVMTE2);
-        WaitFlag<HardEvent::V_MTE2>(eventVMTE2);
         DataCopyCustom<T>(x2Local, gammaGm, numCol);
-        event_t eventMTE2V2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-        SetFlag<HardEvent::MTE2_V>(eventMTE2V2);
+        PipeBarrier<PIPE_V>();
 
         // xFp32Local holds BF16-rounded sum from StageAddBf16 — matches standalone kernel precision
 
@@ -439,30 +410,15 @@ private:
         Div(sqxLocal, tmpLocal, sqxLocal, 1);
         PipeBarrier<PIPE_V>();
 
-        // Copy out rstd
-        event_t eventVMTE3Rstd = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
-        SetFlag<HardEvent::V_MTE3>(eventVMTE3Rstd);
-        WaitFlag<HardEvent::V_MTE3>(eventVMTE3Rstd);
-        DataCopyParams rstdCopyParams;
-        rstdCopyParams.blockLen = sizeof(float);
-        rstdCopyParams.blockCount = 1;
-        DataCopyPad(rstdGm[row], sqxLocal, rstdCopyParams);
-
         // Extract rstd scalar
-        event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(eventVS);
-        WaitFlag<HardEvent::V_S>(eventVS);
         float rstdValue = sqxLocal.GetValue(0);
-        event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
-        SetFlag<HardEvent::S_V>(eventSV);
-        WaitFlag<HardEvent::S_V>(eventSV);
+        PipeBarrier<PIPE_V>();
 
         // x_norm = x * rstd
         Muls(xFp32Local, xFp32Local, rstdValue, numCol);
         PipeBarrier<PIPE_V>();
 
         // Load gamma into FP32
-        WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
         Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);
         PipeBarrier<PIPE_V>();
 
@@ -470,17 +426,20 @@ private:
         Mul(xFp32Local, xFp32Local, sqxLocal, numCol);
         PipeBarrier<PIPE_V>();
 
-        event_t eventMTE3V = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
-        WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
+        // Add bias if provided (FP32)
+        if (this->hasBias) {
+            DataCopyCustom<T>(x2Local, biasGm, numCol);
+            PipeBarrier<PIPE_V>();
+            Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);
+            PipeBarrier<PIPE_V>();
+            Add(xFp32Local, xFp32Local, sqxLocal, numCol);
+            PipeBarrier<PIPE_V>();
+        }
+
         // Cast back to BF16
+        PipeBarrier<PIPE_V>();
         Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
         PipeBarrier<PIPE_V>();
-
-        // Copy out y (rmsnorm result)
-        event_t eventVMTE3Y = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
-        SetFlag<HardEvent::V_MTE3>(eventVMTE3Y);
-        WaitFlag<HardEvent::V_MTE3>(eventVMTE3Y);
-        DataCopyCustom<T>(yGm[row * numCol], x1Local, numCol);
     }
 
     // ---- Stage 3: DynamicQuant (BF16) ----
@@ -564,11 +523,10 @@ private:
     GlobalTensor<T> x1Gm;
     GlobalTensor<T> x2Gm;
     GlobalTensor<T> gammaGm;
+    GlobalTensor<T> biasGm;
     GlobalTensor<int8_t> yQuantGm;
     GlobalTensor<float> scaleGm;
     GlobalTensor<T> xGm;       // add result
-    GlobalTensor<T> yGm;       // rmsnorm result
-    GlobalTensor<float> rstdGm;
 
     // Tiling parameters
     uint32_t numRow;

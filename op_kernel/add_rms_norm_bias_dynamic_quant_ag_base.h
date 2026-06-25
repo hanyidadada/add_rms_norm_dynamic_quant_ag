@@ -317,6 +317,8 @@ protected:
     uint32_t rowLen;
     uint32_t rowTotalNum;
     uint32_t rowWork_;  // rows assigned to this core (0 for extra AG-only cores)
+    uint32_t hasX2;     // 1 if x2 input provided
+    uint32_t hasBias;   // 1 if bias input provided
     int32_t blockIdx_;
 
 public:
