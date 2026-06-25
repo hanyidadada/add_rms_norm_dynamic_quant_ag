@@ -163,6 +163,9 @@ private:
             // Stage 3: DynamicQuant (y_quant = round(y * invScale), FP32 internal)
             // ================================================================
             StageDynamicQuantFp16(row, x1Local, xFp32Local, sqxLocal, tmpLocal, outInt8Local);
+
+            // Sync all pipes between rows to avoid cross-iteration conflicts
+            PipeBarrier<PIPE_ALL>();
         }
     }
 
@@ -356,6 +359,8 @@ private:
             StageAddBf16(row, x1Local, x2Local, xFp32Local, sqxLocal);
             StageRmsNormBf16(row, x1Local, x2Local, xFp32Local, sqxLocal, tmpLocal);
             StageDynamicQuantBf16(row, x1Local, xFp32Local, sqxLocal, tmpLocal, outInt8Local);
+            // Sync all pipes between rows to avoid cross-iteration conflicts
+            PipeBarrier<PIPE_ALL>();
         }
     }
 
