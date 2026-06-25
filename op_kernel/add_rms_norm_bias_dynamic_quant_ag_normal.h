@@ -461,16 +461,6 @@ private:
         Muls(xFp32Local, xFp32Local, rstdValue, numCol);
         PipeBarrier<PIPE_V>();
 
-        // Cast FP32 → BF16
-        event_t eventMTE3V = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
-        WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
-        Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
-        PipeBarrier<PIPE_V>();
-
-        // Cast BF16 → FP32 for gamma multiply (BF16 * BF16 not supported)
-        Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
-        PipeBarrier<PIPE_V>();
-
         // Load gamma into FP32
         WaitFlag<HardEvent::MTE2_V>(eventMTE2V2);
         Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);
@@ -480,6 +470,8 @@ private:
         Mul(xFp32Local, xFp32Local, sqxLocal, numCol);
         PipeBarrier<PIPE_V>();
 
+        event_t eventMTE3V = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+        WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
         // Cast back to BF16
         Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
         PipeBarrier<PIPE_V>();
