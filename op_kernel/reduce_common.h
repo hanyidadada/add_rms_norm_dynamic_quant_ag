@@ -1,154 +1,67 @@
 /**
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
+ * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Refer to the License for details.
  */
+
 /*!
  * \file reduce_common.h
+ * \brief Shared reduce helpers (与旧融合算子一致, WholeReduceSum based)。
  */
-#ifndef REDUCE_COMMON_H_RMS_NORM
-#define REDUCE_COMMON_H_RMS_NORM
+
+#ifndef ADD_RMS_NORM_BIAS_DYNAMIC_QUANT_AG_REDUCE_COMMON_H_
+#define ADD_RMS_NORM_BIAS_DYNAMIC_QUANT_AG_REDUCE_COMMON_H_
+
 #include "kernel_operator.h"
+
 using namespace AscendC;
 
-constexpr uint32_t ELEM_PER_REP_FP32 = 64;
-constexpr uint32_t ELEM_PER_BLK_FP32 = 8;
-constexpr int32_t INDEX_SIXTEEN = 16;
-constexpr float ZERO = 0;
-constexpr int32_t HALf_INTERVAL = 2;
-constexpr uint32_t MAX_REP_NUM = 255;
-constexpr int32_t INDEX_TWO = 2;
-constexpr int32_t INDEX_FOUR = 4;
-constexpr int32_t INDEX_EIGHT = 8;
-
-__aicore__ inline void ReduceSumForSmallReduceDimPreRepeat(
-    const LocalTensor<float>& dstLocal, const LocalTensor<float>& srcLocal, const LocalTensor<float>& tmpLocal,
-    const uint32_t elemNum, const uint32_t numLastDim, const uint32_t tailCount, const uint32_t repeat,
-    const uint8_t repStride)
+// FP32 树形求和 (WholeReduceSum), 输出单个标量到 dst_local[0]。
+__aicore__ inline void ReduceSumFP32(
+    const LocalTensor<float>& dst_local, const LocalTensor<float>& src_local,
+    const LocalTensor<float>& work_local, int32_t count)
 {
-    uint32_t elemIndex4 = 0;
-    for (; elemIndex4 + ELEM_PER_REP_FP32 <= numLastDim; elemIndex4 += ELEM_PER_REP_FP32) {
-        Add(tmpLocal, srcLocal[elemIndex4], tmpLocal, elemNum, repeat,
-            {1, 1, 1, ELEM_PER_BLK_FP32, repStride, ELEM_PER_BLK_FP32});
+    constexpr int32_t NUM_PER_REP_FP32 = 64;   // ONE_REPEAT_BYTE_SIZE / sizeof(float)
+    constexpr int32_t NUM_PER_BLK_FP32 = 8;
+    constexpr float ZERO_F = 0.0f;
+
+    uint64_t mask = NUM_PER_REP_FP32;
+    int32_t repeatTimes = count / NUM_PER_REP_FP32;
+    int32_t tailCount = count % NUM_PER_REP_FP32;
+    int32_t bodyCount = repeatTimes * NUM_PER_REP_FP32;
+    BinaryRepeatParams repeatParams;
+    repeatParams.src0RepStride = ONE_REPEAT_BYTE_SIZE / ONE_BLK_SIZE;
+    repeatParams.src0BlkStride = 1;
+    repeatParams.src1RepStride = 0;
+    repeatParams.src1BlkStride = 1;
+    repeatParams.dstRepStride = 0;
+    repeatParams.dstBlkStride = 1;
+    Duplicate(work_local, ZERO_F, NUM_PER_REP_FP32);
+    PipeBarrier<PIPE_V>();
+    if (likely(repeatTimes > 0)) {
+        Add(work_local, src_local, work_local, mask, repeatTimes, repeatParams);
         PipeBarrier<PIPE_V>();
     }
     if (unlikely(tailCount != 0)) {
-        Add(tmpLocal, srcLocal[elemIndex4], tmpLocal, tailCount, repeat,
-            {1, 1, 1, ELEM_PER_BLK_FP32, repStride, ELEM_PER_BLK_FP32});
+        Add(work_local, src_local[bodyCount], work_local, tailCount, 1, repeatParams);
+        PipeBarrier<PIPE_V>();
     }
-    PipeBarrier<PIPE_V>();
-    AscendCUtils::SetMask<float>(ELEM_PER_REP_FP32); // set mask = 64
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
-    if ASCEND_IS_AIV {
-        WholeReduceSum<float, false>(dstLocal, tmpLocal, elemNum, repeat, 1, 1, ELEM_PER_BLK_FP32);
-    }
-#elif defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113)
-    WholeReduceSum(dstLocal, tmpLocal, elemNum, repeat, 1, 1, ELEM_PER_BLK_FP32);
-#else
-    WholeReduceSum<float, false>(dstLocal, tmpLocal, elemNum, repeat, 1, 1, ELEM_PER_BLK_FP32);
-#endif
-}
-
-__aicore__ inline void ReduceSumForSmallReduceDim(
-    const LocalTensor<float>& dstLocal2, const LocalTensor<float>& srcLocal, const LocalTensor<float>& tmpLocal,
-    const uint32_t numLastDimAligned, const uint32_t numLastDim, const uint32_t tailCount, const uint32_t repeat,
-    const uint8_t repStride)
-{
-    uint32_t repeatTimes = repeat / MAX_REP_NUM;
-    if (repeatTimes == 0) {
-        ReduceSumForSmallReduceDimPreRepeat(
-            dstLocal2, srcLocal, tmpLocal, ELEM_PER_REP_FP32, numLastDim, tailCount, repeat, repStride);
-    } else {
-        uint32_t repTailNum = repeat % MAX_REP_NUM;
-        uint32_t repIndex = 0;
-        for (; repIndex + MAX_REP_NUM <= repeat; repIndex += MAX_REP_NUM) {
-            ReduceSumForSmallReduceDimPreRepeat(
-                dstLocal2[repIndex], srcLocal[repIndex * numLastDimAligned], tmpLocal[repIndex * ELEM_PER_REP_FP32],
-                ELEM_PER_REP_FP32, numLastDim, tailCount, MAX_REP_NUM, repStride);
-        }
-        if (repTailNum != 0) {
-            ReduceSumForSmallReduceDimPreRepeat(
-                dstLocal2[repIndex], srcLocal[repIndex * numLastDimAligned], tmpLocal[repIndex * ELEM_PER_REP_FP32],
-                ELEM_PER_REP_FP32, numLastDim, tailCount, repTailNum, repStride);
-        }
-    }
-}
-
-__aicore__ inline int32_t findPowerTwo(int32_t n1)
-{
-    n1 |= n1 >> 1;
-    n1 |= n1 >> INDEX_TWO;
-    n1 |= n1 >> INDEX_FOUR;
-    n1 |= n1 >> INDEX_EIGHT;
-    n1 |= n1 >> INDEX_SIXTEEN;
-    return (n1 + 1) >> 1;
-}
-
-__aicore__ inline void ReduceSumHalfInterval(
-    const LocalTensor<float>& dst_local, const LocalTensor<float>& src_local6, int32_t count)
-{
-    if (likely(count > ELEM_PER_REP_FP32)) {
-        int32_t bodyCount = findPowerTwo(count);
-        int32_t tailCount = count - bodyCount;
-        if (tailCount > 0) {
-            Add(src_local6, src_local6, src_local6[bodyCount], tailCount);
-            PipeBarrier<PIPE_V>();
-        }
-        while (bodyCount > ELEM_PER_REP_FP32) {
-            bodyCount = bodyCount / HALf_INTERVAL;
-            Add(src_local6, src_local6, src_local6[bodyCount], bodyCount);
-            PipeBarrier<PIPE_V>();
-        }
-        AscendCUtils::SetMask<float>(ELEM_PER_REP_FP32);
-    } else {
-        AscendCUtils::SetMask<float>(count);
-    }
+    AscendCUtils::SetMask<float>(NUM_PER_REP_FP32);
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
     if (g_coreType == AIV) {
-        WholeReduceSum<float, false>(dst_local, src_local6, ELEM_PER_REP_FP32, 1, 0, 1, 0);
+        WholeReduceSum<float, false>(dst_local, work_local, MASK_PLACEHOLDER, 1, 0, 1, 0);
     }
-#elif defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113)
-    WholeReduceSum(dst_local, src_local6, ELEM_PER_REP_FP32, 1, 1, 1, ELEM_PER_BLK_FP32);
-#else
-    WholeReduceSum<float, false>(dst_local, src_local6, ELEM_PER_REP_FP32, 1, 1, 1, DEFAULT_REPEAT_STRIDE);
+#elif !(defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
+    WholeReduceSum<float, false>(dst_local, work_local, MASK_PLACEHOLDER, 1, 1, 1, DEFAULT_REPEAT_STRIDE);
 #endif
     PipeBarrier<PIPE_V>();
 }
 
-__aicore__ inline float ReduceSumHalfInterval(const LocalTensor<float>& src_local4, int32_t count)
+__aicore__ inline void ReduceSumCustom(
+    const LocalTensor<float>& dst_local, const LocalTensor<float>& src_local,
+    const LocalTensor<float>& work_local, int32_t count)
 {
-    if (likely(count > ELEM_PER_REP_FP32)) {
-        int32_t bodyCount = findPowerTwo(count);
-        int32_t tailCount = count - bodyCount;
-        if (tailCount > 0) {
-            Add(src_local4, src_local4, src_local4[bodyCount], tailCount);
-            PipeBarrier<PIPE_V>();
-        }
-        while (bodyCount > ELEM_PER_REP_FP32) {
-            bodyCount = bodyCount / HALf_INTERVAL;
-            Add(src_local4, src_local4, src_local4[bodyCount], bodyCount);
-            PipeBarrier<PIPE_V>();
-        }
-        AscendCUtils::SetMask<float>(ELEM_PER_REP_FP32);
-    } else {
-        AscendCUtils::SetMask<float>(count);
-    }
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
-    if (g_coreType == AIV) {
-        WholeReduceSum<float, false>(src_local4, src_local4, ELEM_PER_REP_FP32, 1, 0, 1, 0);
-    }
-#elif defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113)
-    WholeReduceSum(src_local4, src_local4, ELEM_PER_REP_FP32, 1, 1, 1, ELEM_PER_BLK_FP32);
-#else
-    WholeReduceSum<float, false>(src_local4, src_local4, ELEM_PER_REP_FP32, 1, 1, 1, DEFAULT_REPEAT_STRIDE);
-#endif
-    event_t event_v_s = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-    SetFlag<HardEvent::V_S>(event_v_s);
-    WaitFlag<HardEvent::V_S>(event_v_s);
-    return src_local4.GetValue(0);
+    ReduceSumFP32(dst_local, src_local, work_local, count);
 }
-#endif // _REDUCE_COMMON_H_
+
+#endif // ADD_RMS_NORM_BIAS_DYNAMIC_QUANT_AG_REDUCE_COMMON_H_

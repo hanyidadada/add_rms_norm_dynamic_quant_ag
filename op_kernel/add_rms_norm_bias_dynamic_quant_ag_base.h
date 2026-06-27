@@ -1,16 +1,15 @@
 /**
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
+ * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Refer to the License for details.
  */
 
 /*!
  * \file add_rms_norm_bias_dynamic_quant_ag_base.h
- * \brief Base utilities and AG communication for AddRmsNormBiasDynamicQuantAG fusion kernel
+ * \brief Base utilities and AG communication for AddRmsNormBiasDynamicQuantAG fusion kernel.
+ *
+ * 移植自旧融合算子 base.h, 并补充 dynamic_quant 的 half ReduceMaxInplace 重载
+ * (用于 FP16 db 对称量化分支 API 对齐)。
  */
 
 #ifndef ADD_RMS_NORM_BIAS_DYNAMIC_QUANT_AG_BASE_H_
@@ -26,56 +25,41 @@ using namespace AscendC;
 #define bfloat16_t int16_t
 #endif
 
-// ========== Constants ==========
-
+// ========== 常量 ==========
 constexpr int32_t BUFFER_NUM = 1;
-constexpr int32_t NUM_PER_REP_FP32 = 64;   // ONE_REPEAT_BYTE_SIZE / sizeof(float)
+constexpr int32_t NUM_PER_REP_FP32 = 64;    // ONE_REPEAT_BYTE_SIZE / sizeof(float)
 constexpr int32_t NUM_PER_BLK_FP32 = 8;
-constexpr int32_t NUM_PER_REP_HALF = 128;  // ONE_REPEAT_BYTE_SIZE / sizeof(half)
+constexpr int32_t NUM_PER_REP_HALF = 128;   // ONE_REPEAT_BYTE_SIZE / sizeof(half)
 constexpr int32_t BLOCK_ALIGN_NUM = 16;
 constexpr uint32_t MAX_REPEAT = 255;
+constexpr uint32_t MAX_VALUE_NUM = 8;       // dynamic_quant db 常量缓冲 lane 数
 constexpr float ZERO_F = 0.0f;
 constexpr float ONE_F = 1.0f;
-constexpr float MINUS_HALF_F = -0.5f;
 
-// DynamicQuant constants
+// dynamic_quant 对称量化常量 (与 dynamic_quant_base.h 一致)
 constexpr float DYNAMIC_QUANT_INT8_SYM_SCALE = 127.0f;
 constexpr float DYNAMIC_QUANT_EPSILON = 1e-12f;
 
-// AG constants
+// AG 常量
 constexpr static int32_t FLAG_OFFSET = 100 * 1024 * 1024;
 constexpr static int32_t USED_UB_SIZE = 160 * 1024;
 
-// ========== Type Traits ==========
-
+// ========== 类型 traits ==========
 template <typename Tp, Tp v>
-struct integral_constant {
-    static constexpr Tp value = v;
-};
+struct integral_constant { static constexpr Tp value = v; };
 using true_type = integral_constant<bool, true>;
 using false_type = integral_constant<bool, false>;
+template <typename, typename> struct is_same : public false_type {};
+template <typename Tp> struct is_same<Tp, Tp> : public true_type {};
 
-template <typename, typename>
-struct is_same : public false_type {};
-template <typename Tp>
-struct is_same<Tp, Tp> : public true_type {};
-
-// ========== Utility Functions ==========
-
+// ========== 工具函数 ==========
 template <uint32_t base, typename T = uint32_t>
-__aicore__ inline T AlignUp(T a)
-{
-    return (a + base - 1) / base * base;
-}
+__aicore__ inline T AlignUp(T a) { return (a + base - 1) / base * base; }
 
 template <typename T>
-__aicore__ inline T CeilDiv(T x, T y)
-{
-    return y == 0 ? x : (x + y - 1) / y;
-}
+__aicore__ inline T CeilDiv(T x, T y) { return y == 0 ? x : (x + y - 1) / y; }
 
-// ========== Data Copy ==========
-
+// ========== DataCopy (对齐/非对齐处理, 与旧融合算子一致) ==========
 template <typename T, typename U, typename R>
 __aicore__ inline void DataCopyCustom(const U& dstTensor, const R& srcTensor, const uint32_t count)
 {
@@ -114,73 +98,13 @@ __aicore__ inline void DataCopyCustom(const U& dstTensor, const R& srcTensor, co
 #endif
 }
 
-// ========== Reduce Operations ==========
-
-__aicore__ inline void ReduceSumFP32(
-    const LocalTensor<float>& dst_local, const LocalTensor<float>& src_local,
-    const LocalTensor<float>& work_local, int32_t count)
-{
-    uint64_t mask = NUM_PER_REP_FP32;
-    int32_t repeatTimes = count / NUM_PER_REP_FP32;
-    int32_t tailCount = count % NUM_PER_REP_FP32;
-    int32_t bodyCount = repeatTimes * NUM_PER_REP_FP32;
-    BinaryRepeatParams repeatParams;
-    repeatParams.src0RepStride = ONE_REPEAT_BYTE_SIZE / ONE_BLK_SIZE;
-    repeatParams.src0BlkStride = 1;
-    repeatParams.src1RepStride = 0;
-    repeatParams.src1BlkStride = 1;
-    repeatParams.dstRepStride = 0;
-    repeatParams.dstBlkStride = 1;
-    Duplicate(work_local, ZERO_F, NUM_PER_REP_FP32);
-    PipeBarrier<PIPE_V>();
-    if (likely(repeatTimes > 0)) {
-        Add(work_local, src_local, work_local, mask, repeatTimes, repeatParams);
-        PipeBarrier<PIPE_V>();
-    }
-    if (unlikely(tailCount != 0)) {
-        Add(work_local, src_local[bodyCount], work_local, tailCount, 1, repeatParams);
-        PipeBarrier<PIPE_V>();
-    }
-    AscendCUtils::SetMask<float>(NUM_PER_REP_FP32);
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
-    if (g_coreType == AIV) {
-        WholeReduceSum<float, false>(dst_local, work_local, MASK_PLACEHOLDER, 1, 0, 1, 0);
-    }
-#elif !(defined(__NPU_ARCH__) && __NPU_ARCH__ == 3003)
-    WholeReduceSum<float, false>(dst_local, work_local, MASK_PLACEHOLDER, 1, 1, 1, DEFAULT_REPEAT_STRIDE);
-#endif
-    PipeBarrier<PIPE_V>();
-}
-
-__aicore__ inline void ReduceSumCustom(
-    const LocalTensor<float>& dst_local, const LocalTensor<float>& src_local,
-    const LocalTensor<float>& work_local, int32_t count)
-{
-    ReduceSumFP32(dst_local, src_local, work_local, count);
-}
-
-__aicore__ inline void BlockReduceSumFP32(
-    const LocalTensor<float>& dst_local, const LocalTensor<float>& src_local, int32_t count)
-{
-    int32_t blockRepeatTimes = count / NUM_PER_REP_FP32;
-    int32_t blockTailCount = count % NUM_PER_REP_FP32;
-    int32_t dstAddr = blockRepeatTimes * NUM_PER_BLK_FP32;
-    int32_t srcAddr = blockRepeatTimes * NUM_PER_REP_FP32;
-    if (likely(blockRepeatTimes > 0)) {
-        BlockReduceSum(dst_local, src_local, blockRepeatTimes, NUM_PER_REP_FP32, 1, 1, DEFAULT_REPEAT_STRIDE);
-        PipeBarrier<PIPE_V>();
-    }
-    if (blockTailCount != 0) {
-        BlockReduceSum(dst_local[dstAddr], src_local[srcAddr], 1, blockTailCount, 1, 1, DEFAULT_REPEAT_STRIDE);
-        PipeBarrier<PIPE_V>();
-    }
-}
-
+// ========== ReduceMaxInplace (移植自 dynamic_quant_base.h, float + half 两个重载) ==========
+// FP32 树形求最大, 原地规约到 src_local[0]。用于 db 对称量化求行 absmax (bf16 / fp16+smooth 路径)。
 __aicore__ inline void ReduceMaxInplace(const LocalTensor<float>& src_local, uint32_t count)
 {
     uint64_t repsFp32 = count >> 6;       // count / 64
-    uint64_t offsetsFp32 = repsFp32 << 6; // repsFp32 * 64
-    uint64_t remsFp32 = count & 0x3f;     // count % 64
+    uint64_t offsetsFp32 = repsFp32 << 6;
+    uint64_t remsFp32 = count & 0x3f;
 
     if (likely(repsFp32 > 1)) {
         if (repsFp32 - 1 > MAX_REPEAT) {
@@ -203,8 +127,28 @@ __aicore__ inline void ReduceMaxInplace(const LocalTensor<float>& src_local, uin
     WholeReduceMax(src_local, src_local, mask, 1, 8, 1, 8);
 }
 
-// ========== Quantization ==========
+// half 重载: FP16 域规约 (dynamic_quant db FP16 无 smooth 优化路径用)。
+__aicore__ inline void ReduceMaxInplace(const LocalTensor<half>& src_local, uint32_t count)
+{
+    uint64_t repsHalf = count >> 7;       // count / 128
+    uint64_t offsetsHalf = repsHalf << 7;
+    uint64_t remsHalf = count & 0x7f;
 
+    if (likely(repsHalf > 1)) {
+        Max(src_local, src_local[NUM_PER_REP_HALF], src_local, NUM_PER_REP_HALF, repsHalf - 1,
+            {1, 1, 1, 0, 8, 0});
+        PipeBarrier<PIPE_V>();
+    }
+    if (unlikely(remsHalf > 0) && unlikely(offsetsHalf > 0)) {
+        Max(src_local, src_local[offsetsHalf], src_local, remsHalf, 1, {1, 1, 1, 0, 8, 0});
+        PipeBarrier<PIPE_V>();
+    }
+    uint32_t mask = repsHalf > 0 ? NUM_PER_REP_HALF : count;
+    WholeReduceMax(src_local, src_local, mask, 1, 8, 1, 8);
+}
+
+// ========== 量化: FP32 -> INT16(round) -> half(round) -> INT8(trunc) ==========
+// 不调 SetDeqScale, 与 standalone dynamic_quant DbOpt / MultiRow 路径一致 (dynamic_quant_db.h:219 注释)。
 __aicore__ inline void QuantizeFp32ToInt8(
     const LocalTensor<int8_t>& outInt8,
     const LocalTensor<float>& xFp32,
@@ -215,24 +159,20 @@ __aicore__ inline void QuantizeFp32ToInt8(
     LocalTensor<int16_t> tmpInt16 = tmpInt32.template ReinterpretCast<int16_t>();
     Cast(tmpInt16, xFp32, RoundMode::CAST_RINT, count);
     PipeBarrier<PIPE_V>();
-
-    // No SetDeqScale call — aligns with standalone dynamic_quant DbOpt / MultiRow path
     Cast(tmpHalf, tmpInt16, RoundMode::CAST_ROUND, count);
     PipeBarrier<PIPE_V>();
-
     Cast(outInt8, tmpHalf, RoundMode::CAST_TRUNC, count);
     PipeBarrier<PIPE_V>();
 }
 
-// ========== AG: CopyGMToGM_SplitBytes (ping-pong GM-to-GM copy) ==========
-
+// ========== AG: CopyGMToGM_SplitBytes (ping-pong GM-to-GM 拷贝) ==========
 __aicore__ inline void CopyGMToGM_SplitBytes(
-    AscendC::GlobalTensor<int8_t> &dst1,
-    AscendC::GlobalTensor<int8_t> &dst2,
-    AscendC::GlobalTensor<int8_t> &src,
+    AscendC::GlobalTensor<int8_t>& dst1,
+    AscendC::GlobalTensor<int8_t>& dst2,
+    AscendC::GlobalTensor<int8_t>& src,
     const uint32_t rowLen,
     const uint32_t rowTotalNum,
-    AscendC::TBuf<AscendC::TPosition::VECCALC> &copyBuf)
+    AscendC::TBuf<AscendC::TPosition::VECCALC>& copyBuf)
 {
     constexpr uint32_t EVENT_ID0 = 0;
     constexpr uint32_t EVENT_ID1 = 1;
@@ -256,18 +196,13 @@ __aicore__ inline void CopyGMToGM_SplitBytes(
     auto processCount = CeilDiv<int64_t>(totalBytes, ubMoveBytes);
 
     for (uint32_t i = 0; i < processCount; ++i) {
-        uint32_t curBytes = (i == processCount - 1)
-                           ? totalBytes - i * ubMoveBytes
-                           : ubMoveBytes;
-
+        uint32_t curBytes = (i == processCount - 1) ? (totalBytes - i * ubMoveBytes) : ubMoveBytes;
         uint32_t copyBytes = static_cast<uint32_t>(curBytes);
         AscendC::TEventID eventId = (pingpongId == 0) ? EVENT_ID0 : EVENT_ID1;
         AscendC::LocalTensor<int8_t> ub = (pingpongId == 0) ? buf1 : buf2;
-
         uint32_t srcOffset = i * ubMoveBytes;
 
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
-
         AscendC::DataCopyExtParams readParams(1, copyBytes, 0, 0, 0);
         AscendC::DataCopyPadExtParams<int8_t> padParams(false, 0, 0, 0);
         AscendC::DataCopyPad(ub, src[srcOffset], readParams, padParams);
@@ -298,13 +233,11 @@ __aicore__ inline void CopyGMToGM_SplitBytes(
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
         pingpongId = (pingpongId + 1) % BufferNum;
     }
-
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
 }
 
-// ========== AG Base Class ==========
-
+// ========== AG 基类 ==========
 class KernelAddRmsNormBiasDynamicQuantAGBase {
 protected:
     Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
@@ -316,9 +249,9 @@ protected:
     uint32_t groupSize;
     uint32_t rowLen;
     uint32_t rowTotalNum;
-    uint32_t rowWork_;  // rows assigned to this core (0 for extra AG-only cores)
-    uint32_t hasX2;     // 1 if x2 input provided
-    uint32_t hasBias;   // 1 if bias input provided
+    uint32_t rowWork_;  // 本核行数 (0 = 仅 AG 核)
+    uint32_t hasX2;
+    uint32_t hasBias;
     int32_t blockIdx_;
 
 public:
@@ -333,13 +266,13 @@ public:
         auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
         this->hccl_.InitV2(contextGM0, tiling);
         this->hccl_.SetCcTilingV2(offsetof(AddRmsNormBiasDynamicQuantAGTilingData, mc2CcTiling));
-        for (int i = 0; i < tiling->groupSize; i++) {
+        for (int i = 0; i < (int)tiling->groupSize; i++) {
             this->buff[i] = (GM_ADDR)this->hccl_.GetWindowsInAddr(i);
         }
         this->rankId = this->hccl_.GetRankId();
     }
 
-    __aicore__ inline void SetBuffFlag(__gm__ int32_t *buffPtr, int32_t flag)
+    __aicore__ inline void SetBuffFlag(__gm__ int32_t* buffPtr, int32_t flag)
     {
         SetFlag<HardEvent::S_MTE3>(EVENT_ID2);
         WaitFlag<HardEvent::S_MTE3>(EVENT_ID2);
@@ -351,7 +284,7 @@ public:
         DataCopyPad(gmTensor, ubTensor, dataCopyParams);
     }
 
-    __aicore__ inline void CheckBuffFlag(__gm__ int32_t *buffPtr, int32_t flag)
+    __aicore__ inline void CheckBuffFlag(__gm__ int32_t* buffPtr, int32_t flag)
     {
         SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
         WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
@@ -364,19 +297,17 @@ public:
             DataCopyPad(ubTensor, gmTensor, dataCopyParams, padParams);
             SetFlag<HardEvent::MTE2_S>(EVENT_ID3);
             WaitFlag<HardEvent::MTE2_S>(EVENT_ID3);
-            if (ubTensor(0) == flag) {
-                break;
-            }
+            if (ubTensor(0) == flag) { break; }
         }
     }
 
     __aicore__ inline void CrossRankSyncV1(int32_t flag_idx, int32_t flag_data)
     {
         if (blockIdx_ == 0) {
-            SetBuffFlag((__gm__ int32_t *)(buff[this->rankId] + FLAG_OFFSET + flag_idx * sizeof(int32_t)), flag_data);
+            SetBuffFlag((__gm__ int32_t*)(buff[this->rankId] + FLAG_OFFSET + flag_idx * sizeof(int32_t)), flag_data);
         }
-        if (blockIdx_ < this->groupSize) {
-            CheckBuffFlag((__gm__ int32_t *)(buff[blockIdx_] + FLAG_OFFSET + flag_idx * sizeof(int32_t)), flag_data);
+        if (blockIdx_ < (int32_t)this->groupSize) {
+            CheckBuffFlag((__gm__ int32_t*)(buff[blockIdx_] + FLAG_OFFSET + flag_idx * sizeof(int32_t)), flag_data);
         }
     }
 
@@ -384,7 +315,7 @@ public:
     {
         for (int32_t idx = 0; idx < num_flags; ++idx) {
             if (blockIdx_ == 0) {
-                SetBuffFlag((__gm__ int32_t *)(buff[this->rankId] + FLAG_OFFSET + idx * sizeof(int32_t)), 0);
+                SetBuffFlag((__gm__ int32_t*)(buff[this->rankId] + FLAG_OFFSET + idx * sizeof(int32_t)), 0);
             }
         }
     }
@@ -392,7 +323,7 @@ public:
     __aicore__ inline void ProcessAG()
     {
         this->ResetIpcFlags(2);
-        if (this->blockIdx_ < this->groupSize) {
+        if (this->blockIdx_ < (int32_t)this->groupSize) {
             AscendC::SyncAll<true>();
             this->CrossRankSyncV1(0, 1);
             AscendC::SyncAll<true>();

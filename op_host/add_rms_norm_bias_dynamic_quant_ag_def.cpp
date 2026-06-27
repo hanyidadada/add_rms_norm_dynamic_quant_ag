@@ -1,11 +1,7 @@
 /**
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
+ * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Refer to the License for details.
  */
 
 /*!
@@ -13,8 +9,13 @@
  * \brief Operator definition for AddRmsNormBiasDynamicQuantAG
  *
  * Fused operator: Add(x1+x2) + RMS Norm + Dynamic Quant + AllGather
+ *  - TilingKey 组合编码: rmsKey*100 + quantKey
+ *      (rmsKey 复用 add_rms_norm_bias 的 dtypeKey*10+modeKey;
+ *       quantKey 复用 dynamic_quant 的 db 对称量化 key)
+ *  - UB 内聚合多行计算, 批量聚合 DataCopy 写 GM
  * Targets: ascend910b, ascend910_93
  * Dtypes: FP16, BF16
+ * I/O 契约与旧融合算子 AddRmsNormBiasDynamicQuantAG 完全一致。
  */
 
 #include "register/op_def_registry.h"
@@ -78,14 +79,11 @@ public:
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
 
-        // Attributes
+        // Attributes (order identical to old fused op)
         this->Attr("epsilon").AttrType(OPTIONAL).Float(1e-6f);
-
-        // AG-related attributes
         this->Attr("group").AttrType(REQUIRED).String();
         this->Attr("groupSize").AttrType(OPTIONAL).Int(0);
 
-        // Platform config with dynamic shape/format support
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)
             .DynamicFormatFlag(true)
@@ -97,7 +95,6 @@ public:
             .ExtendCfgInfo("jitCompile.flag", "static_false")
             .ExtendCfgInfo("multiKernelSupportDynamicGraph.value", "multi_kernel");
 
-        // MC2 communication config
         this->MC2().HcclGroup("group");
         this->AICore().AddConfig("ascend910b", aicore_config);
         this->AICore().AddConfig("ascend910_93", aicore_config);

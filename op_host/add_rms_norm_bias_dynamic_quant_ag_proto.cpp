@@ -1,18 +1,14 @@
 /**
  * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
+ * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Refer to the License for details.
  */
 
 /*!
  * \file add_rms_norm_bias_dynamic_quant_ag_proto.cpp
  * \brief Shape and data type inference for AddRmsNormBiasDynamicQuantAG
  *
- * 3 outputs: y_quant(0), scale(1), x(2)
+ * 3 outputs: y_quant(0), scale(1), x(2)  — identical to old fused op.
  */
 
 #include "log/log.h"
@@ -25,8 +21,8 @@ static constexpr int IDX_0 = 0;
 static constexpr int IDX_1 = 1;
 static constexpr int IDX_2 = 2;
 
-// AG attribute indices
-static constexpr int ATTR_GROUP_SIZE = 2; // attr index 3 = groupSize
+// AG attribute indices (epsilon=0, group=1, groupSize=2)
+static constexpr int ATTR_GROUP_SIZE = 2;
 
 using namespace ge;
 using namespace Ops::Base;
@@ -37,14 +33,12 @@ static ge::graphStatus InferShape4AddRmsNormBiasDynamicQuantAG(gert::InferShapeC
 {
     OPS_LOG_D(context, "Begin to do InferShape4AddRmsNormBiasDynamicQuantAG");
 
-    // get input shapes
     const gert::Shape* x1Shape = context->GetInputShape(IDX_0);
     OP_CHECK_NULL_WITH_CONTEXT(context, x1Shape);
 
     const gert::Shape* gammaShape = context->GetInputShape(IDX_2);
     OP_CHECK_NULL_WITH_CONTEXT(context, gammaShape);
 
-    // get output shapes
     gert::Shape* yQuantShape = context->GetOutputShape(IDX_0);
     gert::Shape* scaleShape  = context->GetOutputShape(IDX_1);
     gert::Shape* xShape      = context->GetOutputShape(IDX_2);
@@ -101,10 +95,8 @@ static graphStatus InferDataType4AddRmsNormBiasDynamicQuantAG(gert::InferDataTyp
 
     // yQuant (0): INT8
     context->SetOutputDataType(IDX_0, DT_INT8);
-
     // scale (1): FP32
     context->SetOutputDataType(IDX_1, DT_FLOAT);
-
     // x (2): same type as x1
     context->SetOutputDataType(IDX_2, context->GetInputDataType(IDX_0));
 
