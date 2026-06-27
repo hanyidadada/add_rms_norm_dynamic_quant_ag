@@ -147,7 +147,7 @@ private:
     // ========================================================================
     // FP16 Path — matches standalone add_rms_norm_bias + dynamic_quant calling order
     // ========================================================================
-    __aicore__ inline void ProcessFp16()
+     __aicore__ inline void ProcessFp16()
     {
         LocalTensor<float> ubLocal = unitBuf.Get<float>();
         LocalTensor<T> xLocal = ubLocal.template ReinterpretCast<T>();
@@ -173,6 +173,9 @@ private:
             // Stage 3: DynamicQuant (y_quant = round(y * invScale), FP32 internal)
             // ================================================================
             StageDynamicQuantFp16(row, x1Local, xFp32Local, sqxLocal, tmpLocal, outInt8Local);
+
+            // Sync all pipes between rows to avoid cross-iteration conflicts
+            PipeBarrier<PIPE_ALL>();
         }
     }
 
@@ -182,21 +185,31 @@ private:
     {
         // Load x1
         DataCopyCustom<T>(x1Local, x1Gm[row * numCol], numCol);
-        PipeBarrier<PIPE_V>();
-
+        event_t eventMTE2V_1 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+        SetFlag<HardEvent::MTE2_V>(eventMTE2V_1);
+        
+        // Load x2 if provided
         if (this->hasX2) {
-            // Load x2
             DataCopyCustom<T>(x2Local, x2Gm[row * numCol], numCol);
-            PipeBarrier<PIPE_V>();
+            event_t eventMTE2V_2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+            SetFlag<HardEvent::MTE2_V>(eventMTE2V_2);
+            WaitFlag<HardEvent::MTE2_V>(eventMTE2V_1);
+            WaitFlag<HardEvent::MTE2_V>(eventMTE2V_2);
 
             // FP16 Add: x1Local = x1 + x2
             Add(x1Local, x1Local, x2Local, numCol);
             PipeBarrier<PIPE_V>();
+        } else {
+            WaitFlag<HardEvent::MTE2_V>(eventMTE2V_1);
         }
 
         // Copy out x (add result)
+        event_t eventVMTE3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+        SetFlag<HardEvent::V_MTE3>(eventVMTE3);
+        WaitFlag<HardEvent::V_MTE3>(eventVMTE3);
         DataCopyCustom<T>(xGm[row * numCol], x1Local, numCol);
-        PipeBarrier<PIPE_V>();
+        event_t eventMTE3V = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+        SetFlag<HardEvent::MTE3_V>(eventMTE3V);
     }
 
     // ---- Stage 2: RmsNorm (FP16) ----
@@ -205,8 +218,12 @@ private:
         LocalTensor<float>& xFp32Local, LocalTensor<float>& sqxLocal, LocalTensor<float>& tmpLocal)
     {
         // Copy gamma into x2Local (reuse buffer)
+        event_t eventVMTE2_1 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+        SetFlag<HardEvent::V_MTE2>(eventVMTE2_1);
+        WaitFlag<HardEvent::V_MTE2>(eventVMTE2_1);
         DataCopyCustom<T>(x2Local, gammaGm, numCol);
-        PipeBarrier<PIPE_V>();
+        event_t eventMTE2V_1 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+        SetFlag<HardEvent::MTE2_V>(eventMTE2V_1);
 
         // Cast FP16 → FP32
         Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
@@ -234,32 +251,46 @@ private:
         PipeBarrier<PIPE_V>();
 
         // Extract rstd scalar
+        event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventVS);
+        WaitFlag<HardEvent::V_S>(eventVS);
         float rstdValue = sqxLocal.GetValue(0);
-        PipeBarrier<PIPE_V>();
+        event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventSV);
+        WaitFlag<HardEvent::S_V>(eventSV);
 
         // x_norm = x * rstd
         Muls(xFp32Local, xFp32Local, rstdValue, numCol);
         PipeBarrier<PIPE_V>();
 
         // Cast FP32 → FP16
-        PipeBarrier<PIPE_V>();
+        event_t eventMTE3V = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+        WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
         Cast(x1Local, xFp32Local, RoundMode::CAST_NONE, numCol);
         PipeBarrier<PIPE_V>();
 
         // Multiply by gamma (FP16)
+        WaitFlag<HardEvent::MTE2_V>(eventMTE2V_1);
         Mul(x1Local, x1Local, x2Local, numCol);
         PipeBarrier<PIPE_V>();
-
+        
         // Add bias if provided (FP16)
         if (this->hasBias) {
+            event_t eventVMTE2_2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+            SetFlag<HardEvent::V_MTE2>(eventVMTE2_2);
+            WaitFlag<HardEvent::V_MTE2>(eventVMTE2_2);
             DataCopyCustom<T>(x2Local, biasGm, numCol);
-            PipeBarrier<PIPE_V>();
+            event_t eventMTE2V_2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+            SetFlag<HardEvent::MTE2_V>(eventMTE2V_2);
+            WaitFlag<HardEvent::MTE2_V>(eventMTE2V_2);
+
             Add(x1Local, x1Local, x2Local, numCol);
             PipeBarrier<PIPE_V>();
         }
     }
 
     // ---- Stage 3: DynamicQuant (FP16) ----
+    // Matches SingleN kernel: FP32 Abs+ReduceMax, scale = 1.0 / invScale
     __aicore__ inline void StageDynamicQuantFp16(uint32_t row,
         LocalTensor<T>& x1Local,
         LocalTensor<float>& xFp32Local, LocalTensor<float>& sqxLocal, LocalTensor<float>& tmpLocal,
@@ -273,11 +304,11 @@ private:
         Abs(sqxLocal, xFp32Local, numCol);
         PipeBarrier<PIPE_V>();
 
-        // Reduce max in-place
+        // Reduce max in-place (FP32)
         ReduceMaxInplace(sqxLocal, numCol);
         PipeBarrier<PIPE_V>();
 
-        // invScale = 127.0 / rowMax
+        // invScale = 127.0 / maxAbs
         LocalTensor<float> constScale = tmpLocal;
         Duplicate<float>(constScale, DYNAMIC_QUANT_INT8_SYM_SCALE, 1);
         PipeBarrier<PIPE_V>();
@@ -293,10 +324,10 @@ private:
         SetFlag<HardEvent::S_V>(eventSV2);
         WaitFlag<HardEvent::S_V>(eventSV2);
 
-        // scaleOut = max_abs / 127.0
+        // scale = 1.0 / invScale = maxAbs / 127.0 — matches SingleN kernel
         float scaleVal = 1.0f / invScale;
 
-        // Copy out scale to HCCL window
+        // Copy scale to HCCL window
         sqxLocal.SetValue(0, scaleVal);
         PipeBarrier<PIPE_V>();
         event_t eventVMTE3Scale = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
@@ -316,7 +347,7 @@ private:
         LocalTensor<half> tmpHalfLocal = tmpLocal.template ReinterpretCast<half>();
         QuantizeFp32ToInt8(outInt8Local, xFp32Local, tmpInt32Local, tmpHalfLocal, numCol);
 
-        // Copy out yQuant to HCCL window
+        // Copy yQuant to HCCL window
         event_t eventVMTE3Quant = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
         SetFlag<HardEvent::V_MTE3>(eventVMTE3Quant);
         WaitFlag<HardEvent::V_MTE3>(eventVMTE3Quant);
@@ -324,7 +355,7 @@ private:
     }
 
     // ========================================================================
-    // BF16 Path — matches standalone add_rms_norm_bias + dynamic_quant calling order
+    // BF16 Path — matches standalone add_rms_norm_bias MODE_NORMAL calling order
     // ========================================================================
     __aicore__ inline void ProcessBf16()
     {
@@ -341,6 +372,8 @@ private:
             StageAddBf16(row, x1Local, x2Local, xFp32Local, sqxLocal);
             StageRmsNormBf16(row, x1Local, x2Local, xFp32Local, sqxLocal, tmpLocal);
             StageDynamicQuantBf16(row, x1Local, xFp32Local, sqxLocal, tmpLocal, outInt8Local);
+            // Sync all pipes between rows to avoid cross-iteration conflicts
+            PipeBarrier<PIPE_ALL>();
         }
     }
 
@@ -351,12 +384,16 @@ private:
     {
         // Load x1
         DataCopyCustom<T>(x1Local, x1Gm[row * numCol], numCol);
-        PipeBarrier<PIPE_V>();
+        event_t eventMTE2V_1 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+        SetFlag<HardEvent::MTE2_V>(eventMTE2V_1);
 
         if (this->hasX2) {
             // Load x2
             DataCopyCustom<T>(x2Local, x2Gm[row * numCol], numCol);
-            PipeBarrier<PIPE_V>();
+            event_t eventMTE2V_2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+            SetFlag<HardEvent::MTE2_V>(eventMTE2V_2);
+            WaitFlag<HardEvent::MTE2_V>(eventMTE2V_1);
+            WaitFlag<HardEvent::MTE2_V>(eventMTE2V_2);
 
             // BF16: cast both to FP32, add, cast back to BF16
             Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
@@ -366,6 +403,8 @@ private:
             PipeBarrier<PIPE_V>();
             Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
             PipeBarrier<PIPE_V>();
+        } else {
+            WaitFlag<HardEvent::MTE2_V>(eventMTE2V_1);
         }
 
         // Reload BF16-rounded values for rmsnorm consistency (match standalone kernel precision)
@@ -373,8 +412,12 @@ private:
         PipeBarrier<PIPE_V>();
 
         // Copy out x (add result)
+        event_t eventVMTE3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+        SetFlag<HardEvent::V_MTE3>(eventVMTE3);
+        WaitFlag<HardEvent::V_MTE3>(eventVMTE3);
         DataCopyCustom<T>(xGm[row * numCol], x1Local, numCol);
-        PipeBarrier<PIPE_V>();
+        event_t eventMTE3V = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+        SetFlag<HardEvent::MTE3_V>(eventMTE3V);
     }
 
     // ---- Stage 2: RmsNorm (BF16) ----
@@ -383,8 +426,12 @@ private:
         LocalTensor<float>& xFp32Local, LocalTensor<float>& sqxLocal, LocalTensor<float>& tmpLocal)
     {
         // Copy gamma
+        event_t eventVMTE2_1 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+        SetFlag<HardEvent::V_MTE2>(eventVMTE2_1);
+        WaitFlag<HardEvent::V_MTE2>(eventVMTE2_1);
         DataCopyCustom<T>(x2Local, gammaGm, numCol);
-        PipeBarrier<PIPE_V>();
+        event_t eventMTE2V_2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+        SetFlag<HardEvent::MTE2_V>(eventMTE2V_2);
 
         // xFp32Local holds BF16-rounded sum from StageAddBf16 — matches standalone kernel precision
 
@@ -410,23 +457,20 @@ private:
         PipeBarrier<PIPE_V>();
 
         // Extract rstd scalar
+        event_t eventVS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventVS);
+        WaitFlag<HardEvent::V_S>(eventVS);
         float rstdValue = sqxLocal.GetValue(0);
-        PipeBarrier<PIPE_V>();
+        event_t eventSV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventSV);
+        WaitFlag<HardEvent::S_V>(eventSV);
 
         // x_norm = x * rstd
         Muls(xFp32Local, xFp32Local, rstdValue, numCol);
         PipeBarrier<PIPE_V>();
 
-        // Cast FP32 → BF16
-        PipeBarrier<PIPE_V>();
-        Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
-        PipeBarrier<PIPE_V>();
-
-        // Cast BF16 → FP32 for gamma multiply (BF16 * BF16 not supported)
-        Cast(xFp32Local, x1Local, RoundMode::CAST_NONE, numCol);
-        PipeBarrier<PIPE_V>();
-
         // Load gamma into FP32
+        WaitFlag<HardEvent::MTE2_V>(eventMTE2V_2);
         Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);
         PipeBarrier<PIPE_V>();
 
@@ -436,8 +480,14 @@ private:
 
         // Add bias if provided (FP32)
         if (this->hasBias) {
+            event_t eventVMTE2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+            SetFlag<HardEvent::V_MTE2>(eventVMTE2);
+            WaitFlag<HardEvent::V_MTE2>(eventVMTE2);
             DataCopyCustom<T>(x2Local, biasGm, numCol);
-            PipeBarrier<PIPE_V>();
+            event_t eventMTE2V_2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+            SetFlag<HardEvent::MTE2_V>(eventMTE2V_2);
+            WaitFlag<HardEvent::MTE2_V>(eventMTE2V_2);
+
             Cast(sqxLocal, x2Local, RoundMode::CAST_NONE, numCol);
             PipeBarrier<PIPE_V>();
             Add(xFp32Local, xFp32Local, sqxLocal, numCol);
@@ -445,7 +495,8 @@ private:
         }
 
         // Cast back to BF16
-        PipeBarrier<PIPE_V>();
+        event_t eventMTE3V = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+        WaitFlag<HardEvent::MTE3_V>(eventMTE3V);
         Cast(x1Local, xFp32Local, RoundMode::CAST_RINT, numCol);
         PipeBarrier<PIPE_V>();
     }
@@ -468,7 +519,16 @@ private:
         ReduceMaxInplace(sqxLocal, numCol);
         PipeBarrier<PIPE_V>();
 
-        // invScale = 127.0 / rowMax
+        // Read max_abs before Div overwrites it
+        event_t eventVS2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventVS2);
+        WaitFlag<HardEvent::V_S>(eventVS2);
+        float maxAbs = sqxLocal.GetValue(0);
+        event_t eventSV2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventSV2);
+        WaitFlag<HardEvent::S_V>(eventSV2);
+
+        // invScale = 127.0 / max_abs
         LocalTensor<float> constScaleBf16 = tmpLocal;
         Duplicate<float>(constScaleBf16, DYNAMIC_QUANT_INT8_SYM_SCALE, 1);
         PipeBarrier<PIPE_V>();
@@ -476,15 +536,15 @@ private:
         PipeBarrier<PIPE_V>();
 
         // Extract invScale scalar
-        event_t eventVS2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
-        SetFlag<HardEvent::V_S>(eventVS2);
-        WaitFlag<HardEvent::V_S>(eventVS2);
+        event_t eventVS3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+        SetFlag<HardEvent::V_S>(eventVS3);
+        WaitFlag<HardEvent::V_S>(eventVS3);
         float invScale = sqxLocal.GetValue(0);
-        event_t eventSV2 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
-        SetFlag<HardEvent::S_V>(eventSV2);
-        WaitFlag<HardEvent::S_V>(eventSV2);
+        event_t eventSV3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+        SetFlag<HardEvent::S_V>(eventSV3);
+        WaitFlag<HardEvent::S_V>(eventSV3);
 
-        // scaleOut = max_abs / 127.0
+        // scale = 1.0 / invScale = maxAbs / 127.0 — matches SingleN kernel
         float scaleVal = 1.0f / invScale;
 
         // Copy out scale to HCCL window

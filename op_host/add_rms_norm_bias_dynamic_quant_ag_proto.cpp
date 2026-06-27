@@ -26,7 +26,7 @@ static constexpr int IDX_1 = 1;
 static constexpr int IDX_2 = 2;
 
 // AG attribute indices
-static constexpr int ATTR_GROUP_SIZE = 3; // attr index 3 = groupSize
+static constexpr int ATTR_GROUP_SIZE = 2; // attr index 3 = groupSize
 
 using namespace ge;
 using namespace Ops::Base;

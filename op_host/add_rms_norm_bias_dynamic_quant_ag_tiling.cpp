@@ -56,9 +56,10 @@ static constexpr int IDX_YQUANT  = 0;
 static constexpr int IDX_SCALE   = 1;
 static constexpr int IDX_X       = 2;   // add result
 
+static constexpr int EPSILON_IDX = 0;
 // AG attribute indices
-static constexpr int GROUP_IDX = 2;
-static constexpr int GROUP_SIZE_IDX = 3;
+static constexpr int GROUP_IDX = 1;
+static constexpr int GROUP_SIZE_IDX = 2;
 
 // ========== Utility Functions ==========
 
@@ -214,7 +215,7 @@ static float GetEpsilon(gert::TilingContext* context)
     if (attrs == nullptr) {
         return 1e-6f;
     }
-    float epsilon = *attrs->GetFloat(0);
+    float epsilon = *attrs->GetFloat(EPSILON_IDX);
     return (epsilon >= 0) ? epsilon : 1e-6f;
 }
 
@@ -447,7 +448,7 @@ static ge::graphStatus TilingAddRmsNormBiasDynamicQuantAG(gert::TilingContext* c
     auto aivNum = ascendcPlatform.GetCoreNumAiv();
 
     std::string algConfig;
-    if (aivNum < 24) {
+    if (aivNum < 40) {
         algConfig = "AlltoAll=level0:fullmesh";
     } else {
         algConfig = "AlltoAll=level0:fullmesh;level1:pairwise";

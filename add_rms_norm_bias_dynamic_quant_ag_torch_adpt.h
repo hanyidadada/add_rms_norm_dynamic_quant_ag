@@ -43,16 +43,9 @@ add_rms_norm_bias_dynamic_quant_ag(
     at::Tensor scale = at::empty(scale_size, x1.options().dtype(scale_dtype));
     at::Tensor x_out = at::empty(x_out_size, x1.options().dtype(x_out_dtype));
 
-    if (bias.has_value()) {
-        EXEC_NPU_CMD(aclnnAddRmsNormBiasDynamicQuantAG, x1, x2, gamma, bias.value(), epsilon,
+    EXEC_NPU_CMD(aclnnAddRmsNormBiasDynamicQuantAG, x1, x2, gamma, bias, epsilon,
                      group_ptr, group_size, y1, scale, x_out);
-    } else {
-        at::Tensor empty_bias;
-        EXEC_NPU_CMD(aclnnAddRmsNormBiasDynamicQuantAG, x1, x2, gamma, empty_bias, epsilon,
-                     group_ptr, group_size, y1, scale, x_out);
-    }
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(
-        y1, scale, x_out);
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y1, scale, x_out);
 }
 }
 #endif
